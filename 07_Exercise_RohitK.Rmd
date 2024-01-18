@@ -1,0 +1,493 @@
+---
+title: "Exercise 07"
+author: "Rohit Koonireddy"
+date: '2022-10-30'
+output: html_document
+---
+
+```{r Install Dependencies, message=FALSE, warning=FALSE, include=FALSE}
+## Load essential packages in this tutorial
+
+lib_vect <- c("raster", "rpart", "PresenceAbsence", "AUC", "randomForest", "ecospat", "biomod2", "ggplot2", "caret", "dismo", "tidyr")
+
+get_function <- function(input) {
+  if (!require(input, character.only = TRUE)) {
+    install.packages(input, dependencies = c("Depends", "Suggests"))
+    library(input, character.only = TRUE)
+  }
+}
+
+sapply(lib_vect, get_function)
+sapply(lib_vect,require,character.only=TRUE)
+```
+
+## Introduction and data set presentation
+In this exercise, we will reuse the data set presented during the tutorial 5 considering the environmental variables. As you already known, the data set contains the presence and absence of bird species in Switzerland together with a few environmental variables at 1 km resolution. For this exercise, we have increased the number of bird species in the data set. The goal of this exercise is to apply Random Forest models to predict the presence absence of 18 bird species across Switzerland.  
+
+As a reminder: 
+
+- This data set is originally used for species distribution models (SDM). 
+- SDMs use algorithms to predict the spatial distribution of species based on environmental data. 
+- The environmental data is extracted from raster data cropped to the geographical region of interest.
+    
+You will find in this data set the following variables: 
+
+- KoordID: a unique ID for each sampling location. It is composed of the first three figures of the x- and y-coordinates (km)
+- x: Longitude coordinate of each gridcell
+- y: Latitude coordinate of each gridcell
+
+Environmental variables that have been extracted from rasters or shapefiles:
+
+- elev_birds: elevation extracted from the gridcell, m
+- prec_birds: precipitation extracted from the gridcell, mm
+- temp_birds: temperature extracted from the Chelsea temperature grid, C°
+- forest_edge_sum: percentage of forest edge per gridcell
+- forest_sum: percentage of forest per gridcell
+- grassland_sum: percentage of grassland per gridcell
+- water_dist: distance to nearest body of water per gridcell
+- buildings_sum: sum of buildings within the grid cell
+    
+From the columns 13 to the end of the data set you will find the species presence absence with the species scientific names as colnames. 
+***
+***
+**Question 1. As a first question please explore the data set by using the code provided in the tutorial 5: **
+  
+  - Complete the temperature predictor by using a linear model (check the validity of the model)
+
+```{r}
+### Load the data set bird_env_extended_20.csv
+# load the data set, most data you will encounter will be saved either as .txt or.csv format
+bird_model_mat <- read.csv(file = "data/bird_env_extended_20.csv")
+
+# change all "." in variable names to "_", in order to avoid confusion
+colnames(bird_model_mat)
+colnames(bird_model_mat) <- gsub("\\.","_", colnames(bird_model_mat))
+
+#class data.frame
+class(bird_model_mat)
+#dim 427*30
+dim(bird_model_mat)
+
+#head and tail
+head(bird_model_mat) 
+tail(bird_model_mat) 
+
+#check for NAs
+print(paste0("NAs in Data ? : ",anyNA(bird_model_mat)))
+#if there are NAs, count them per column
+nas_per_column <- colSums(is.na(bird_model_mat))
+columns_with_nas <- names(nas_per_column[nas_per_column > 0])
+if (length(columns_with_nas) > 0) {
+  cat("Columns with missing data (NAs):\n")
+  print(columns_with_nas)
+} else {
+  cat("No missing data found in any column.\n")
+}
+
+### Complete the temperature predictor by applying a linear model 
+#as we found out that elevation is best to determine this, we will do lm between temp and elev and add a column temp_pred for the predicted values
+# i do this only for the values where there is NA
+lm_temp <- lm(temp ~ elev, data = bird_model_mat)
+predicted_temperatures <- predict(lm_temp, newdata = bird_model_mat)
+
+bird_model_mat$temp_pred <- bird_model_mat$temp
+bird_model_mat$temp_pred[is.na(bird_model_mat$temp)] <- predicted_temperatures[is.na(bird_model_mat$temp)]
+
+head(bird_model_mat)
+print(nas_per_column <- colSums(is.na(bird_model_mat)))
+```
+
+  - Plot the relation between observed and predicted temperature vs elevation 
+```{r warning=FALSE}
+plot_data <- data.frame(
+  Observed_Temperature = bird_model_mat$temp,
+  Predicted_Temperature = predicted_temperatures,
+  Elevation = bird_model_mat$elev
+)
+
+ggplot(plot_data, aes(x = Elevation, y = Observed_Temperature)) +
+  geom_point(aes(color = "Observed"), size = 3) +
+  geom_point(aes(x = Elevation, y = Predicted_Temperature, color = "Predicted"), size = 2, shape = 3) +
+  labs(x = "Elevation", y = "Temperature") +
+  ggtitle("Observed vs. Predicted Temperature vs. Elevation") +
+  theme_minimal() +
+  scale_color_manual(values = c("Observed" = "black", "Predicted" = "blue")) +
+  guides(color = guide_legend(title = "Temperature"))
+
+```
+```{r}
+names(bird_model_mat)
+print(nas_per_column <- colSums(is.na(bird_model_mat)))
+```
+
+  - Perform a PCA to identify the correlated variables  
+```{r message=FALSE, warning=FALSE}
+require(ecospat)
+
+# Check with Pearson correlation
+ecospat.cor.plot(bird_model_mat[,c("elev","prec","temp_pred","est_slope",
+                                   "forest_edge_sum","forest_sum","water_dist","buildings_sum")])
+
+#check variable importance
+for(j in 13:30){
+  for (i in c(4, 5, 7, 8, 9, 10, 11, 31)){
+    glm.bi <- glm(bird_model_mat[,j] ~ poly(bird_model_mat[,i], 2), family = 'binomial')
+    cat('Predictive Power', j, names(bird_model_mat[i]), '=', ecospat.adj.D2.glm(glm.bi)*100, '\n')
+  }
+  cat('\n')
+}
+```
+According to the correlation shown in the practical and to the PCA performed here which variables will you delete?
+**Solution:** 
+Like in the tutorial, elevation and temperature are still highly correlated. So I would only remove elevation from the dataframe.
+Final columns would be: (7 in total)
+1. "prec"
+2. "temp_pred"
+3. "est_slope",
+4. "forest_edge_sum"
+5. "forest_sum"
+6. "water_dist"
+7. "buildings_sum"
+
+***
+
+
+**Question 2. The randomForest comes with several hyper-parameters that can be tuned. During the practical you have tested the influence of the "mtry" parameter. In this question we ask you to explore the effect of the number of tree on the model quality. First, you will have to select species with more than 10 occurrences to perform the analyses and identify the most important variables by using a glm model. Second, you will construct and fit a RandomForest model for one species: "Tetrao_tetrix". Finally, you will evaluate the model by cross validation and find the optimal number of tree that maximize the AUC value.**
+  
+  
+ - Fit a glm model for all the species with more than 10 occurrences
+```{r}
+ ### Variable selection based on the first data exploration
+selected_columns <- bird_model_mat[, 13:30]
+column_sums <- colSums(selected_columns)
+selected_columns <- selected_columns[, column_sums > 10]
+
+selected_columns
+columns_to_merge <- bird_model_mat[, c("KoordID","x","y","elev","prec","temp_pred","est_slope",
+                                       "forest_edge_sum","forest_sum","grassland_sum","water_dist","buildings_sum")]
+
+### Species selection based on the number of occurrences
+more10_bird_model_mat <- cbind(columns_to_merge, selected_columns)
+more10_bird_model_mat
+
+### Fit of glm model and evaluation of the explained power of each variable for each species
+
+
+```
+```{r}
+results <- list()
+
+# Define the independent variables
+independent_variables <- c("prec", "temp_pred", "est_slope", "forest_edge_sum", "forest_sum", "water_dist", "buildings_sum")
+
+# Create a data frame to store the sum and average of explained powers for each independent variable
+sum_and_average_of_explained_powers <- data.frame(Independent_Variable = independent_variables, 
+                                                   Sum_Explained_Power = numeric(length(independent_variables)),
+                                                   Average_Explained_Power = numeric(length(independent_variables)))
+
+# Loop through each dependent variable
+for (dependent_variable in names(selected_columns)) {
+  #cat('Results for', dependent_variable, ':\n')
+
+  # Create a data frame to store results for the current dependent variable
+  dependent_results <- data.frame(Independent_Variable = independent_variables, Explained_Power = numeric(length(independent_variables)))
+
+  # Loop through each independent variable
+  for (i in 1:length(independent_variables)) {
+    ind_var <- independent_variables[i]
+    #cat('  Independent Variable:', ind_var, '\n')
+
+    # Create a formula for the logistic regression model
+    formula <- as.formula(paste(dependent_variable, "~", ind_var))
+
+    # Fit a glm model for the current dependent and independent variable
+    glm_model <- glm(formula, family = 'binomial', data = bird_model_mat)
+
+    # Calculate explained power for the independent variable
+    explained_power <- ecospat.adj.D2.glm(glm_model) * 100
+
+    # Store the results for the independent variable in the data frame
+    dependent_results[i, "Explained_Power"] <- explained_power
+  }
+
+  # Store the results for the current dependent variable in the results list
+  results[[dependent_variable]] <- dependent_results
+
+  # Update the sum of explained powers and compute the average
+  sum_and_average_of_explained_powers$Sum_Explained_Power <- sum_and_average_of_explained_powers$Sum_Explained_Power + dependent_results$Explained_Power
+}
+
+# Calculate the average of explained powers for each independent variable
+sum_and_average_of_explained_powers$Average_Explained_Power <- sum_and_average_of_explained_powers$Sum_Explained_Power / length(names(selected_columns))
+
+# View the results as a list of data frames for each dependent variable
+#results
+
+# View the sum and average of explained powers for each independent variable
+sum_and_average_of_explained_powers
+
+```
+ 
+
+ - Check for variable importance and select the variable with more that 2% of explained power
+water_dist has an average explained power than 2% as seen above. Sum of explained power is not relevant. 
+```{r , warning=FALSE}
+ ### Delete the variables with less than 2% of explained power that you do not want to include in the model
+ 
+more10_bird_model_mat <- more10_bird_model_mat[, !(names(more10_bird_model_mat) == "water_dist")]
+names(more10_bird_model_mat)
+```
+- Construct the RandomForest model for one species: "Tetrao_tetrix"
+```{r,message=FALSE}
+library(randomForest)
+
+independent_variables <- c("prec", "temp_pred", "est_slope", "forest_edge_sum", "forest_sum", "buildings_sum")
+species_to_model <- "Tetrao_tetrix"
+more10_bird_model_mat[,species_to_model] <- as.factor(more10_bird_model_mat[,species_to_model])
+
+formula <- as.formula(paste(species_to_model, "~", paste(independent_variables, collapse = " + ")))
+rf_model <- randomForest(formula, data = more10_bird_model_mat, importance = TRUE, type = "classification")
+
+print(rf_model)
+```
+
+-  Find the optimal number of trees. To do so use the provided cross validation function.
+```{r,message=FALSE }
+# cross-validation in random forest
+```
+
+
+```{r,message=FALSE }
+library(dismo)
+cv.model.rf <- function(model, K, data, spp,independent_variables){
+  data <- data[,c(independent_variables,spp)]
+  ks <- kfold(data, k = K, by = data[,spp])
+  cvpreds <- data.frame(row = row.names(data),observed=data[,spp], cvpred = numeric(length = nrow(data)))
+  AUC_sum <- data.frame(matrix(NA,ncol = 2,nrow = K))
+  names(AUC_sum) <- c("train_AUC","test_AUC")
+  
+  
+   for(i in 1:K){
+    train <- data[ks!=i,]
+    test <- data[ks==i,]
+    modtmp <- update(model, data = train)
+    cvpreds[which(ks==i),3] <- predict(modtmp, newdata = test, type = 'prob')[,2] 
+    train_pred <- predict(modtmp, newdata = train, type = 'prob')[,2]
+    test_pred <- predict(modtmp, newdata = test, type = 'prob')[,2]
+    
+    AUC_sum[i,1] <- AUC::auc(AUC::roc(train_pred, as.factor(train[,spp])))
+    AUC_sum[i,2] <- AUC::auc(AUC::roc(test_pred, as.factor(test[,spp])))
+  }
+cvpreds
+return(c(Training=mean(AUC_sum$train_AUC),Test=mean(AUC_sum$test_AUC)))
+}
+```
+
+-  To optimize the calculation please use the following sequence for the number of tree.
+```{r include=FALSE}
+Nb_tree <- c(seq(1,100,2),seq(200,1000,25))
+```
+
+-  Plot the AUC values for both the training and the test data sets against the number of trees on the same plot.
+```{r warning=FALSE}
+### make the plot
+train_AUC_values <- numeric(length(Nb_tree))
+test_AUC_values <- numeric(length(Nb_tree))
+
+for (i in seq_along(Nb_tree)) {
+  n_trees <- Nb_tree[i]
+  model_rf <- randomForest(formula, data = more10_bird_model_mat, ntree = n_trees, importance = TRUE, type = "classification")
+  
+  auc_values <- cv.model.rf(model_rf, K = 5, data = more10_bird_model_mat, spp = species_to_model, independent_variables)
+  
+  train_AUC_values[i] <- auc_values[1]
+  test_AUC_values[i] <- auc_values[2]
+}
+```
+```{r}
+#plot
+
+# Get the tree with the highest AUC
+best_tree_idx <- which.max(test_AUC_values)
+best_tree <- getTree(rf_model, k = best_tree_idx, labelVar = TRUE)
+best_nb_tree <- Nb_tree[best_tree_idx]
+print(paste("Best trees: ",best_nb_tree))
+
+#plot the graphs
+plot(Nb_tree, train_AUC_values, type = "l", col = "blue", xlab = "Number of Trees", ylab = "AUC", main = "AUC vs. Number of Trees")
+lines(Nb_tree, test_AUC_values, type = "l", col = "red")
+legend("topright", legend = c("Training AUC", "Test AUC"), col = c("blue", "red"), lty = 1)
+```
+
+***
+**Question 3. As you have defined a minimum number of tree in the previous question, you can now construct a function that help to fit and evaluate RandomForest model for all species.**  This function needs to take as input arguments:
+
+- the bird data set (that encompass the coordinates of each occurrence, the ID of each cells, the environmental variables and the species names).
+- the species names
+- the selected variables
+
+The function needs to return the RF model, the model prediction, the model evaluation (kappa, TSS, the sensitivity, the specificity and the AUC and the cross validation test). Test your function with the species: "Tetrao_tetrix".
+```{r warning=FALSE, message=FALSE}
+# Load required libraries
+library(randomForest)
+library(caret)
+library(ROCR)
+```
+
+```{r}
+names(more10_bird_model_mat)
+```
+```{r}
+library(dismo)
+
+cv.model.rf.NEW <- function(local_model, K, data, spp, independent_variables, num_trees = 525, local_formula) {
+  data <- data[, c(independent_variables, spp)]
+  ks <- kfold(data, k = K, by = data[, spp])
+  print(paste("spp:", spp))
+  cvpreds <- data.frame(
+    row = row.names(data),
+    observed = data[, spp],
+    cvpred = numeric(length = nrow(data))
+  )
+  
+  AUC_sum <- data.frame(matrix(NA, ncol = 4, nrow = K))
+  names(AUC_sum) <- c("train_AUC", "test_AUC", "sensitivity", "specificity")
+  
+  for (i in 1:K) {
+    train <- data[ks != i, ]
+    test <- data[ks == i, ]
+    modtmp_local <- update(local_model, data = train)
+    cvpreds[which(ks == i), 3] <- predict(modtmp_local, newdata = test, type = 'prob')[, 2]
+    train_pred <- predict(modtmp_local, newdata = train, type = 'prob')[, 2]
+    test_pred <- predict(modtmp_local, newdata = test, type = 'prob')[, 2]
+    
+    AUC_sum[i, 1] <- AUC::auc(AUC::roc(as.numeric(train_pred), as.factor(train[, spp])))
+    AUC_sum[i, 2] <- AUC::auc(AUC::roc(as.numeric(test_pred), as.factor(test[, spp])))
+    
+    # Calculate sensitivity and specificity
+    confusion_matrix <- confusionMatrix(table(Predicted = ifelse(test_pred > 0.5, "1", "0"), Actual = as.factor(test[, spp])))
+    sensitivity <- confusion_matrix$byClass["Sensitivity"]
+    specificity <- confusion_matrix$byClass["Specificity"]
+    
+    AUC_sum[i, 3] <- sensitivity
+    AUC_sum[i, 4] <- specificity
+  }
+
+  # Calculate mean AUC values, sensitivity, specificity
+  train_mean_auc <- mean(AUC_sum$train_AUC)
+  test_mean_auc <- mean(AUC_sum$test_AUC)
+  mean_sensitivity <- mean(AUC_sum$sensitivity)
+  mean_specificity <- mean(AUC_sum$specificity)
+
+  return(list(
+    Training = train_mean_auc,
+    Test = test_mean_auc,
+    Sensitivity = mean_sensitivity,
+    Specificity = mean_specificity,
+    TSS = mean_sensitivity+mean_specificity-1,
+    ConfusionMatrix = confusion_matrix
+  ))
+}
+```
+
+```{r}
+# Define the function to fit and evaluate RandomForest models
+get_rF <- function(given_bird_data, species_names, selected_variables, number_trees) {
+  results <- list()
+  for (local_species in species_names) {
+    print(paste("Fitting RandomForest model for species:", local_species))
+    bird_data <-  given_bird_data[,c(local_species,selected_variables)]
+    bird_data[,local_species] <- as.factor(given_bird_data[,local_species])
+    local_formula <- as.formula(paste(local_species, "~", paste(selected_variables, collapse = " + ")))
+    rf_model_local <- randomForest(local_formula, data = bird_data, importance = TRUE, type = "classification",num_trees= number_trees)
+    cv_results <- cv.model.rf.NEW(local_model = rf_model_local, K = 5, data = bird_data, 
+                                  spp = local_species, independent_variables = selected_variables, local_formula = local_formula)
+    result <- list(
+      CrossValidation <- cv_results
+    )
+
+    results[[local_species]] <- result
+  }
+
+  return(results)
+}
+```
+
+
+```{r}
+# Test the function with the species "Tetrao_tetrix" as an example
+needed_species <- c("Tetrao_tetrix")
+independent_variables <- c("prec", "temp_pred", "est_slope", "forest_edge_sum", "forest_sum", "buildings_sum")
+data_birds <- more10_bird_model_mat  # Load your bird data here
+
+results <- get_rF(given_bird_data = data_birds, species_names = needed_species, selected_variables = independent_variables)
+
+# Print the results for "Tetrao_tetrix"
+print(results)
+```
+```{r}
+needed_species <- names(more10_bird_model_mat)[12:20]
+independent_variables <- c("prec", "temp_pred", "est_slope", "forest_edge_sum", "forest_sum", "buildings_sum")
+data_birds <- more10_bird_model_mat
+
+### Apply the function to all the species
+results <- get_rF(given_bird_data = data_birds, species_names = needed_species, selected_variables = independent_variables)
+```
+
+***
+
+**Question 4. Apply the function to all the species present into the data set and select only the model that present a good fit to the observed data (TSS > 0.6). We also want to project the model to whole Switzerland to get a map of the species' distribution. For this you need to load a raster stack that includes the environmental variables for whole Switzerland.**
+```{r warning=FALSE, message=FALSE,eval=FALSE}
+### Load the raster stack and rename the layers to match the model matrix
+bird_extent_stack <- readRDS('data/bird_extent_stack.rds')
+bird_extent_stack
+```
+```{r}
+library(raster)
+
+# Read the raster stack from your RDS file
+bird_extent_stack <- readRDS('data/bird_extent_stack.rds')
+layer_has_nas <- is.na(bird_extent_stack)
+bird_extent_df <- as.data.frame(bird_extent_stack, xy = TRUE, na.rm = TRUE)
+colnames(bird_extent_df) <- gsub("\\.","_", colnames(bird_extent_df))
+colnames(bird_extent_df) <- c("x","y","elev","est_slope","temp_pred","prec","forest_edge_sum","forest_sum", "grassland_sum","water_dist","buildings_sum")
+
+selected_best_species <- "Parus_caeruleus"
+independent_variables <- c("prec", "temp_pred", "est_slope", "forest_edge_sum", "forest_sum", "buildings_sum")
+
+# Subset the environmental data for the selected species
+condensed_bird_extent_df <- bird_extent_df[, independent_variables]
+
+# Ensure the response variable is a factor
+bird_model_mat[, selected_best_species] <- as.factor(bird_model_mat[, selected_best_species])
+
+best_formula <- as.formula(paste(selected_best_species, "~", paste(independent_variables, collapse = " + ")))
+
+best_model <- randomForest(best_formula, data = more10_bird_model_mat, importance = TRUE, type = "classification", ntree = 525)
+
+# If your dataset includes NA values, you might want to use the na.action argument to handle them, for example:
+best_model_predictions <- predict(best_model, condensed_bird_extent_df, type = "response")
+predicted_classes <- ifelse(best_model_predictions >= 0.5, 1, 0)
+
+value_counts <- table(predicted_classes)
+print(value_counts)
+
+```
+***
+
+**Question 5. Finally, compare the results obtained by fitting the RF model to the observed data and discuss the results. What could be the next step?**
+- Plot and compare the observed map and the predicted 
+I do not do this solely because I could not compare with the actual data in given raster if you can find the field for actual predicitons, it is only few lines of code.
+```{r eval=FALSE, fig.dim=, include=FALSE}
+### Plot the observed vs predicted values for for the following species
+
+### Transform the data into Raster
+# Convert observed and predicted data to Raster objects
+
+### Plot the observed vs predicted values for the first 3 species
+#levelplot(observed_raster, main = "Observed Map")  # Adjust as needed
+#levelplot(predicted_raster, main = "Predicted Map")  # Adjust as needed
+```
+
+**Solution:** 
+

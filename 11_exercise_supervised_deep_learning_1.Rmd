@@ -1,0 +1,536 @@
+---
+title: 'Exercise 11: Supervised Deep Learning I: CNNs '
+author: 'Rohit Koonireddy'
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+---
+
+# Exercise on CNNs
+The purpose of this exercise is to create a CNN model for a multiclass classification problem, on your own. You have the tutorial material to copy pieces of code, and practice, we all have google and other examples online. Using online tutorials and examples is totally fine, as long as we carefully review what we take and check, after all, if we can take those pieces!  
+
+So far, a binary classification problem was considered. However, in practice, there are several cases where more than 2 classes have to be considered. For example, the [mnist](https://en.wikipedia.org/wiki/MNIST_database) dataset consists of handwritten digit images and in total contains 10 different classes (number 0 to number 9). This dataset is part of Keras `datasets`, so we can get it easily. It might not be the most interesting dataset, but keep in mind this is one of the datasets that actually sparked research in CNNs! 
+
+The goal of this exercise is to create a model that takes the handwritten image as input and predicts the number which is written in this image.
+
+Regarding the modelling part of multiclass classification problem the only thing that changes, compared to a binary classification problem, is the number of nodes and the activation function on the output layer. Also, a different loss function has to be considered (`categorical_crossentropy`), the same we used for the MLP or logistic regrssion in Keras. In other words, the number of nodes of the output layer should equal the number of discrete classes (10 in our case). 
+Furthermore, the activation function of the output layer is the `softmax` activation which converts each output node to a probability of the corresponding class. Therefore, for a prediction, we choose the class where its node gives the maximum probability.
+
+Furthermore, a skeleton code is provided which does the preprocessing and creates a baseline model.
+
+Your task is to create a CNN architecture that outperforms the baseline model. The data are class balanced so accuracy can be used in this case. You should use dropout and/or regularization to avoid overfitting. Also, comment on the number of trainable parameters for each model.
+
+
+### Import libraries and data
+```{r message=FALSE, warning=FALSE}
+require(remotes)
+rm(list=ls())
+library(reticulate)
+#use_condaenv('r-reticulate')
+library(keras)
+library(tensorflow)
+library(tidyverse)
+library(rsample)
+set_random_seed(101)
+```
+
+### Tasks
+
+Get MNIST data as `dataset_mnist()`
+
+```{r}
+mnist = dataset_mnist()
+# take train and test set
+train = mnist$train
+test = mnist$test
+```
+
+
+```{r}
+#examine data
+class(train)
+names(train)
+dim(train$x)
+dim(train$y)
+```
+
+
+1. Plot an image
+```{r, eval=F}
+index_image = sample(1:dim(train$x)[1],1) ## change this index to see different image.
+input_matrix = train$x[index_image,,]
+
+output_matrix = apply(input_matrix, 2, rev)
+output_matrix = t(output_matrix)
+
+image(output_matrix, col=gray.colors(256), xlab=paste('Image for digit ', train$y[index_image]), ylab="")
+```
+
+2. Specify image size and number of classes. The original image size of 28 x 28 x 1 is what we want to use. 
+```{r}
+# Specify image size and number of classes
+IMG_SIZE <- dim(train$x[1,,])
+IMG_CHANNELS <- 1
+N_CLASSES <- length(unique(c(train$y, test$y)))  # Count unique classes from train and test sets
+
+cat('Image size: ', IMG_SIZE[1:2], "\n")
+cat('Number of channels: ', IMG_CHANNELS, "\n")
+cat('Total classes: ', N_CLASSES)
+```
+```{r}
+# Check the structure of train_set and validation_set
+str(train)
+str(test)
+str(validation)
+```
+
+
+3. Create a validation set from the training set using stratified split from `rsample` and rescale input to [0,1]. The test set is already defined. 
+- Hint: `split = initial_split(data.frame('y'=train$y),prop = 0.8, strata = 'y')`
+- Hint: check data statistics to see what we need to do to normalise MNIST. 
+```{r message=FALSE, warning=FALSE}
+library(keras)
+
+mnist = dataset_mnist()
+# Assuming you've loaded the mnist dataset
+train <- mnist$train
+test <- mnist$test
+
+# Set the seed for reproducibility
+set.seed(123)
+
+# Make stratified split
+split = initial_split(data.frame('y'=train$y),prop = 0.8, strata = 'y')
+
+training_set <- list()
+validation_set <- list()
+test_set<- test
+
+# Access the actual indices from the split object
+training_data_indices <- seq_len(nrow(train$x))
+training_indices <- split$in_id
+validation_indices <- setdiff(training_data_indices , training_indices)
+
+# Access the training set and validation set
+training_set$x <- train$x[training_indices, ,]
+validation_set$x <- train$x[validation_indices, ,]
+training_set$y <- train$y[training_indices]
+validation_set$y <- train$y[validation_indices]
+
+# Normalize pixel values
+training_set$x_normalized <- training_set$x / 255
+validation_set$x_normalized <- validation_set$x / 255
+test_set$x_normalized <- test_set$x / 255
+
+# Print summary of the training set
+cat('Training set summary:\n')
+str(training_set)
+
+# Print summary of the validation set
+cat('Validation set summary:\n')
+str(validation_set)
+
+# Print summary of the test set
+cat('Test set summary:\n')
+str(test_set)
+
+```
+
+4. Encode classes to one-hot vectors, and print the sum of the columns and check how the label distribution is. Hint: `?to_categorical()`
+```{r}
+x_train <- training_set$x_normalized
+y_train <- training_set$y
+
+x_val <- validation_set$x_normalized
+y_val <- validation_set$y
+
+x_test <- test_set$x_normalized
+y_test <- test_set$y
+
+# Get the unique levels from y_train
+unique_levels <- levels(factor(y_train))
+
+# Encode classes to one-hot vectors for y_test using the levels from y_train
+y_train_one_hot <- to_categorical(y_train, num_classes =  length(unique_levels))
+y_test_one_hot <- to_categorical(y_test, num_classes =  length(unique_levels))
+y_val_one_hot <- to_categorical(y_val, num_classes = length(unique_levels))
+
+col_sums <- colSums(y_train_one_hot)
+cat('Label Distribution:\n')
+print(col_sums)
+```
+
+--Importing functions needed
+```{r}
+# a function that specifies the size of the plot
+fig_size = function(width, height){
+     options(repr.plot.width = width, repr.plot.height = height)
+}
+
+# a function that visualize the corresponding RGB image derived from a tensor
+plotRGB  = function(img_tensor){
+     
+    #take dimension of image
+    width = dim(img_tensor)[1]
+    height = dim(img_tensor)[2]
+    
+    #take color channels
+    red = as.numeric(img_tensor[,,1])
+    green = as.numeric(img_tensor[,,2])
+    blue = as.numeric(img_tensor[,,3])
+    
+    #create dataframe
+    img = data.frame(x = rep(1:height,each = width), y = rep(height:1,times = width) , r = red , g = green, b = blue)
+    
+    #plot RGB image
+    img %>% ggplot(aes(x=x, y=y, fill=rgb(r,g,b))) + 
+        geom_raster()+
+        scale_y_continuous()+
+        scale_x_continuous()+ 
+        scale_fill_identity()+
+        theme_void()
+    }
+
+# a function that plot the output of the given filter activation
+plot_filter = function(filter_activation){
+    
+    #create dataframe
+    height = dim(filter_activation)[1]
+    width = dim(filter_activation)[2]
+    filter = data.frame(x = rep(1:width,each = height), y = rep(height:1,times = width) , fill =  as.numeric(filter_activation))
+    
+    #plot filter
+    p = filter %>% ggplot(aes(x = x,y = y))+
+        geom_raster(aes(fill = fill),show.legend = FALSE) +
+        scale_y_continuous()+
+        scale_x_continuous()+
+        scale_fill_viridis_c()+
+        theme_void()
+    return(p)
+    }
+```
+
+
+5. Create and train the baseline model
+
+A simple approach to go on and classify this dataset is to create a vector (flatten the 2d input matrix) from the input image and then to apply an MLP (only dense layers). You are already provided with a trained model (because it takes a long time to train it from scratch), so you do not have to run the fit function. You just have to load the model. This model basically assumes each pixel is independent on the image plane, and local structures and correlation are not modeled. 
+
+You don't have to run the following chunk but have a look at this model nevertheless. It is a quite small one, so you can run it if you want. Note that we are not really making all we can to avoid overfitting with this MLP because: 
+- We _know_ this is the wrong model specification. 
+- MNIST can be classified accurately also by relatively small models, and this is one
+
+```{r, warning=FALSE}
+mlp_model = keras_model_sequential()
+
+mlp_model %>% layer_flatten(input_shape = IMG_SIZE) %>%
+          layer_dense(units = 32,activation = 'relu')%>%
+          layer_dense(units = 64,activation = 'relu')%>%
+          layer_dense(units = 128,activation = 'relu') %>%
+          layer_dense(units = 512, activation = 'relu') %>%
+          layer_dense(units = N_CLASSES, activation = 'softmax')
+
+mlp_model %>% compile(
+  loss = 'categorical_crossentropy',
+  optimizer = optimizer_adam(learning_rate = 0.001),
+  metrics = c('accuracy')
+)
+
+summary(mlp_model)
+
+dir.create(file.path('saved_models'))
+save_mlp = file.path('saved_models','my_mnist_baseline.h5') 
+  
+callbacks_mlp = list(
+                # callback_early_stopping(monitor='val_loss', patience = 5, mode = 'min'), # we can leave this one out. 
+                callback_model_checkpoint(save_mlp, monitor='val_loss',save_best_only = T,mode = 'min')
+              )
+
+if (T){ # DO NOT TRAIN IF YOU FEEL LIKE IS GOING TO BE TOO SLOW
+  history_mlp = fit(mlp_model,x_train, y_train_one_hot, epochs = 20, batch_size = 128,
+                      validation_data = list(x_val,y_val_one_hot),callbacks = callbacks_mlp)
+  history = c()
+  history$mnist_mlp_baseline = history_mlp
+  
+  # let's keep track of all histories and overwrite when we add a new one
+  saveRDS(history, file = "./saved_models/mnist_history.rds")
+} else{
+  history = readRDS('./saved_models/mnist_history.rds')
+}
+
+```
+
+Plot its training history 
+
+```{r}
+history = readRDS("./saved_models/mnist_history.rds")
+fig_size(8,8)
+plot(history$mnist_mlp_baseline) + theme_grey(base_size = 20)
+```
+
+6. Load the saved Baseline model and evaluate the performance on validation and test set
+
+```{r, eval=F}
+# Load the saved Baseline model
+mlp_model <- load_model_hdf5("saved_models/my_mnist_baseline.h5")
+
+# Evaluate the model on the validation set
+mlp_val_metrics <- evaluate(mlp_model, x_val, y_val_one_hot)
+mlp_val_acc <- mlp_val_metrics["accuracy"]
+
+# Evaluate the model on the test set
+mlp_test_metrics <- evaluate(mlp_model, x_test, y_test_one_hot)
+mlp_test_acc <- mlp_test_metrics["accuracy"]
+
+cat('Validation Accuracy: ', mlp_val_acc, '\n')
+cat('Test Accuracy: ', mlp_test_acc, '\n')
+```
+
+
+### Comparison to a custom CNN! 
+1. Create a CNN architecture that you think it is reasonable :) 
+Hints: 
+- 2 conv layers, 1 dense layer and 1 classificatoin layer should be enough
+- Target half the number of parameters of the MLP. 
+
+```{r, warning=FALSE}
+IMG_SIZE <- c(28, 28, 1)
+
+cnn_model <- keras_model_sequential() %>%
+  layer_conv_2d(filters = 16, kernel_size = c(3, 3), activation = 'relu', input_shape = IMG_SIZE) %>%
+  layer_max_pooling_2d(pool_size = c(2, 2)) %>%
+  layer_conv_2d(filters = 32, kernel_size = c(3, 3), activation = 'relu') %>%
+  layer_max_pooling_2d(pool_size = c(2, 2)) %>%
+  layer_flatten() %>%
+  layer_dense(units = 128, activation = 'relu') %>%
+  layer_dense(units = N_CLASSES, activation = 'softmax')
+
+# Print the model summary
+summary(cnn_model)
+```
+2. Compile the model. 
+
+```{r}
+#compile the model
+cnn_model %>% compile(
+  loss = 'categorical_crossentropy',
+  optimizer = optimizer_adam(learning_rate = 0.001),
+  metrics = c('accuracy')
+)
+```
+
+3. Train the model
+- Monitor the validation accuracy
+- Store the history in the already existing file and the model `my_mnist_cnn.h5` in `/saved_models/` 
+
+Hint: 
+- Reshape your inputs so that they match the desired dimension of the input_shape in `layer_conv_2d`. 
+- Use callbacks for odel checkpoint (look at the baseline model).
+
+```{r}
+# Reshape input
+x_train_cnn <- array_reshape(x_train, dim = c(dim(x_train)[1], 28, 28, 1))
+x_val_cnn <- array_reshape(x_val, dim = c(dim(x_val)[1], 28, 28, 1))
+x_test_cnn <- array_reshape(x_test, dim = c(dim(x_test)[1], 28, 28, 1))
+```
+
+
+```{r}
+dir.create(file.path('saved_models'))
+save_cnn = file.path('saved_models','my_mnist_cnn.h5') 
+  
+callbacks_cnn = list(
+                # callback_early_stopping(monitor='val_loss', patience = 5, mode = 'min'), # we can leave this one out. 
+                callback_model_checkpoint(save_cnn, monitor='val_loss',save_best_only = T,mode = 'min')
+              )
+
+history_cnn = fit(cnn_model,x_train, y_train_one_hot, epochs = 20, batch_size = 128,
+                      validation_data = list(x_val,y_val_one_hot),callbacks = callbacks_cnn)
+history_cnn_1 = c()
+history_cnn_1$mnist_cnn <- history_cnn
+saveRDS(history_cnn_1, file = "./saved_models/mnist_history_cnn.rds")
+```
+
+Plot the history
+```{r}
+history_cnn_1 = readRDS("./saved_models/mnist_history_cnn.rds")
+fig_size(8,8)
+plot(history_cnn_1$mnist_cnn) + theme_grey(base_size = 20)
+```
+
+3. Load the saved model, evaluate performance on validation and test set
+```{r}
+cnn_model <- load_model_hdf5("./saved_models/my_mnist_cnn.h5")
+
+# Evaluate the model on the validation set
+cnn_val_metrics <- evaluate(cnn_model, x_val_cnn, y_val_one_hot)
+cnn_val_acc <- cnn_val_metrics["accuracy"]
+
+# Evaluate the model on the test set
+cnn_test_metrics <- evaluate(cnn_model, x_test_cnn, y_test_one_hot)
+cnn_test_acc <- cnn_val_metrics["accuracy"]
+
+cat('Validation Accuracy: ', cnn_val_acc, '\n')
+cat('Test Accuracy: ', cnn_test_acc, '\n')
+```
+
+4. Print summary of both models and comment: 
+
+- How do the histories look like? Plot again both of them and compare them. 
+
+```{r,eval=F}
+fig_size(8,8)
+plot(history$mnist_mlp_baseline) + theme_grey(base_size = 20)
+
+fig_size(8,8)
+plot(history_cnn_1$mnist_cnn) + theme_grey(base_size = 20)
+```
+
+- What can we say about overfitting and accuracy on training set, as compared on the accuracy on the validation set? 
+We can look at the plot of differences in accuracy between the MLP and the CNN, for both the training and validation sets; and comparing the test accuracy computed above. For instance, we could use the relative improvement in percentage, as $r = 100 \cdot \frac{\text{history_cnn} - \text{history_mlp} }{\text{history_mlp}}$.
+
+```{r,eval=F}
+relative_val_accuracy <- 100 * ((cnn_val_acc - mlp_val_acc) / mlp_val_acc)
+relative_test_accuracy <- 100 * ((cnn_test_acc - mlp_test_acc) / mlp_test_acc)
+# Print relative improvements
+cat('Relative Improvement in Validation Accuracy (%): ', relative_val_accuracy, '\n')
+cat('Relative Improvement in Test Accuracy (%): ', relative_test_accuracy, '\n')
+
+```
+
+- How many parameters are there, and how do models' accuracy compare, in relative measure (again, use MLP as baseline)? 
+
+```{r}
+# Compare the number of parameters
+mlp_params <- count_params(mlp_model)
+cnn_params <- count_params(cnn_model)
+
+cat('Number of Parameters (MLP): ', mlp_params, '\n')
+cat('Number of Parameters (CNN): ', cnn_params, '\n')
+```
+
+### The inductive bias of a CNN. 
+
+So, just, how better is a CNN for images? Why is it like that? The answer is that shared convlutions provide a better feature extraction overall, by computing features that are local image activations and providing meaningful ways to describe the content. In facts, a model can contain _inductive bias_ in the form of preferences for types of data, for which the model is more adapted. Or, in other words, the solution space that the CNNs cover is adapted to images, while the one for MLPs is not. 
+
+How can we see that? EASY! define two models, one MLP, one CNN, and pass to all the layers with learnable parameters the argument `trainable = F`, with the exception for the last classification layer, which we keep it as `T` (or not pass anything as this is the default). Just one modification, as all layers are now fixed to the randomly initialized values, use more units for the penultimate layer of the CNN, to match the MLP (512). The number of trainable parameters now shoudl be exactly the same. If not it would be somewhat unfair (but not changing too much what you will discover shortly). Rename the models and all arguments of the functions to include `_random_` in them, so that you do not overwrite the actual models.
+
+In this case, we are using both MLP and CNN as _fixed_ feature extractors, with _random_ parameters, and we are classifying the outputs of this feature extraction uwing a 1 layer MLP, in both cases! can you see that? 
+- Define the random models and train only the last layers. Just copy the architectures and code above and change / add what is needed. 
+
+```{r}
+# Define random MLP model
+mlp_random_model <- keras_model_sequential()
+
+mlp_random_model %>%
+  layer_flatten(input_shape = IMG_SIZE, trainable = FALSE) %>%
+  layer_dense(units = 128, activation = 'relu', trainable = FALSE) %>%
+  layer_dense(units = N_CLASSES, activation = 'softmax', trainable = TRUE)
+
+# Compile the random MLP model
+mlp_random_model %>% compile(
+  loss = 'categorical_crossentropy',
+  optimizer = optimizer_adam(learning_rate = 0.001),
+  metrics = c('accuracy')
+)
+
+# Print the summary of the random MLP model
+summary(mlp_random_model)
+
+# Create callbacks for model checkpoint
+dir.create(file.path('saved_models'))
+save_mlp_random = file.path('saved_models', 'mlp_random_model.h5') 
+callbacks_mlp_random = list(
+  callback_model_checkpoint(save_mlp_random, monitor = 'val_loss', save_best_only = TRUE, mode = 'min')
+)
+
+# Train the random MLP model
+history_random_mlp = fit(
+  mlp_random_model, x_train, y_train_one_hot,
+  epochs = 20, batch_size = 128,
+  validation_data = list(x_val, y_val_one_hot),
+  callbacks = callbacks_mlp_random
+)
+
+```
+```{r}
+history_mlp_2 = c()
+history_mlp_2$mnist_mlp1 <- history_random_mlp
+saveRDS(history_mlp_2, file = "./saved_models/mnist_history_mlp_random.rds")
+history_mlp_2 = readRDS("./saved_models/mnist_history_mlp_random.rds")
+fig_size(8,8)
+plot(history_mlp_2$mnist_mlp1) + theme_grey(base_size = 20)
+```
+
+```{r}
+# Define random CNN model
+cnn_random_model <- keras_model_sequential()
+
+IMG_SIZE <- c(28, 28, 1)
+
+cnn_random_model %>%
+  layer_conv_2d(filters = 16, kernel_size = c(3, 3), activation = 'relu', input_shape = IMG_SIZE) %>%
+  layer_max_pooling_2d(pool_size = c(2, 2)) %>%
+  layer_conv_2d(filters = 40, kernel_size = c(3, 3), activation = 'relu', trainable = FALSE) %>%
+  layer_max_pooling_2d(pool_size = c(2, 2)) %>%
+  layer_flatten() %>%
+  layer_dense(units = 512, activation = 'relu', trainable = FALSE) %>%
+  layer_dense(units = N_CLASSES, activation = 'softmax', trainable = TRUE)
+
+# Compile the random CNN model
+cnn_random_model %>% compile(
+  loss = 'categorical_crossentropy',
+  optimizer = optimizer_adam(learning_rate = 0.001),
+  metrics = c('accuracy')
+)
+
+# Print the summary of the random CNN model
+summary(cnn_random_model)
+
+# Create callbacks for model checkpoint
+save_cnn_random = file.path('saved_models', 'cnn_random_model.h5') 
+callbacks_cnn_random = list(
+  callback_model_checkpoint(save_cnn_random, monitor = 'val_loss', save_best_only = TRUE, mode = 'min')
+)
+
+# Train the random CNN model
+history_random_cnn = fit(
+  cnn_random_model, x_train_cnn, y_train_one_hot,
+  epochs = 20, batch_size = 128,
+  validation_data = list(x_val_cnn, y_val_one_hot),
+  callbacks = callbacks_cnn_random
+)
+
+```
+
+
+Remember to match the hidden layer dimensionality between MLP and CNN
+
+Plot the history `history_random_mlp` and `history_random_cnn` and compare them. Crazy right? 
+
+```{r}
+history_cnn_2 = c()
+history_cnn_2$mnist_cnn2 <- history_random_cnn
+saveRDS(history_cnn_2, file = "./saved_models/mnist_history_cnn_random.rds")
+history_mlp_2 = readRDS("./saved_models/mnist_history_cnn_random.rds")
+fig_size(8,8)
+plot(history_cnn_2$mnist_cnn2) + theme_grey(base_size = 20)
+```
+
+Compute again the relative improvements if you want, but not needed actually to understand what happened! What is your take on this? 
+
+# Why is it like that? 
+The CNN model likely performs well due to its ability to capture hierarchical and spatial features in the image data, leveraging shared convolutional layers. Here are some reasons why the CNN model might outperform the MLP model:
+
+Hierarchical Feature Extraction: CNNs use convolutional layers to learn hierarchical features from the input images. The lower layers capture basic features like edges and textures, while deeper layers combine these features to represent more complex structures. This hierarchical feature extraction is beneficial for image classification tasks.
+
+Translation Invariance: Convolutional layers are inherently translation invariant, meaning they can recognize patterns regardless of their position in the image. This property is crucial for recognizing objects in different parts of the image.
+
+Local Receptive Fields: Convolutional layers operate on local receptive fields, allowing them to focus on small regions of the input image. This local processing helps capture spatial hierarchies and local patterns efficiently.
+
+Parameter Sharing: Convolutional layers share weights across spatial locations, reducing the number of parameters compared to fully connected layers. This parameter sharing enables the model to generalize better and learn more robust features.
+
+Reduced Sensitivity to Spatial Variations: Pooling layers in CNNs reduce sensitivity to small spatial variations, making the model more robust to translations, rotations, and distortions in the input.
+
+Pre-trained Models: In practice, pre-trained CNN models on large datasets (e.g., ImageNet) are often used as a starting point. Transfer learning from such models can provide a significant boost in performance, especially when dealing with limited labeled data.
+
+Effective Use of GPU: CNNs are highly parallelizable, making them well-suited for GPU acceleration. This allows for faster training times, enabling the model to learn more complex features.
+

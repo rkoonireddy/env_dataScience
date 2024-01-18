@@ -1,0 +1,350 @@
+---
+title: "Exercise with solutions, week 3: Exploratory Data Analysis"
+author: "Rohit Koonireddy"
+date: '2023-10-03'
+output: html_document
+---
+
+```{r message=FALSE}
+require(lubridate)
+require(tidyverse)
+require(ncdf4)
+require(viridis)
+require(raster)
+require(rworldmap)
+require(EFDR)
+library(RColorBrewer)
+```
+
+# Global mean temperature data
+
+In the tutorial, we used mean global temperature data to practice skills in data preprocessing and exploratory analysis. We will begin using the same dataset to examine some techniques more closely. Begin by importing the data and selecting the lon, lat and temperature variables into a list in the same format as the tutorial.
+
+```{r}
+# Import the data as in the tutorial
+nc_data = nc_open('./data/absolute_v5.nc') # Open the file to read the netcdf data
+print(nc_data) # Runs an "nc dump" to show a summary of the file
+lon <- ncvar_get(nc_data, "lon")
+print(paste0("longitudes:"))
+head(lon) # show the start of the lon data vector
+
+print(paste0("latitudes:"))
+lat <- ncvar_get(nc_data, "lat", verbose = F)
+head(lat) # show the start of the lat data vector
+
+print(paste0("months:"))
+time <- ncvar_get(nc_data, "time", verbose = F)
+print(time) # show the start of the time data vector
+
+print(paste0("dimensions for temperature: lon, lat, month"))
+tem <- ncvar_get(nc_data, "tem")
+dim(tem) # temperature has dimensions of lon,lat,month
+```
+Check for missing values and replace with NaN
+```{r}
+# do rest of the corrections to the data
+# Get also the missing value designator (we know this is -9999 from the nc dump)
+fillvalue <- ncatt_get(nc_data, "tem", "missing_value", verbose="F") # This functions allows us to retrieve an attribute called "missing_value" from the "tem" variable in the nc_data dataset
+fillvalue 
+
+nc_close(nc_data) # We have the data so we can close the netcdf file
+sum(tem == fillvalue$value) # See how many missing values there are
+tem[tem == fillvalue$value] = NaN
+abs_tem <- list(lat=lat,lon=lon,tem=tem)
+```
+Disretize the latitudes data using buckets ranging between -90 and +90 with bucket size of 30.
+```{r}
+lat_cutoffs <- c(-90,-60,-30,0,30,60,90)
+
+# Preallocate an array for the results; dimensions = time (month), latitude band, mean/std
+mean_tem_latbands <- array(dim=c(12,length(lat_cutoffs)-1,2))
+
+# Discretize latitude
+abs_tem$lat_band <- abs_tem$tem*NaN # space for discretized lat band, same size as tem 
+for (n in 1:(length(lat_cutoffs)-1)){ # Loop through the lat bands
+  # Find lats corresponding to this band
+  tmp = abs_tem$lat > lat_cutoffs[n] & abs_tem$lat <= lat_cutoffs[n+1]
+  # Give a number to each band
+  abs_tem$lat_band[,tmp,] <- n 
+}
+
+# Monthly mean for each band
+for (n in 1:12){
+  # convert tem data and lat band labels to vector so we can use aggregate
+  labels <- as.vector(abs_tem$lat_band[,,n]) 
+  data <- as.vector(abs_tem$tem[,,n])
+  mean_tem_latbands[n,,1] <- aggregate(data, list(labels), FUN=mean)$x
+  mean_tem_latbands[n,,2] <- aggregate(data, list(labels), FUN=sd)$x
+}
+
+
+# Look at the results: mean and std are printed as separate tables, with dimensions of month * lat band
+mean_tem_latbands
+
+```
+
+See the results
+```{r}
+par(mar=c(2,4,1,1)) # set plotting margins
+par(mfrow=c(2,1)) # Create subplots for mean and stdev or you can combine the two lines par(mar=c(2,4,1,1),mfrow=c(2,1))
+colours <- viridis(6) # Viridis gives us a set of a chosen number of colour-blind friendly colours for plotting
+
+# Plot the mean temperature
+plot(1:12,mean_tem_latbands[,1,1],type="n",xlab="month",ylab="Mean T",ylim=c(-40,40),xlim=c(1,12)) # initialize empty plot 
+for (n in 1:6){
+  lines(1:12,mean_tem_latbands[,n,1],col=colours[n],lw=2)
+}
+
+# Plot the std in temperature
+plot(1:12,mean_tem_latbands[,1,2],type="n",xlab="month",ylab="Stdev in T",ylim=c(0,25),xlim=c(1,12)) # initialize empty plot 
+for (n in 1:6){
+  lines(1:12,mean_tem_latbands[,n,2],col=colours[n],lw=2)
+}
+
+# Add a legend
+legendtext <- paste0(head(lat_cutoffs,-1)," to ",tail(lat_cutoffs,-1))
+legend("bottomleft",legend=legendtext,col=colours,lty=1,cex=0.5,lw=2)
+
+```
+# Regridding data
+
+In the tutorial, we used the **regrid** function. Write a wrapper function (a function that calls another function inside) for **regrid** with the format:
+
+* regrid_wrapper = function(df,n1,n2,idp,nmax,plotresults=TRUE){}
+
+* The input df should be a dataframe with variables lon, lat, tem. You'll need to select just one month of data for the input.
+
+* n1,n2,idp,nmax will be passed on to regrid by regrid_wrapper
+
+* The output should be a dataframe the same format as the input
+
+* `plotresults' is optional input with TRUE as the default. If TRUE, a plot comparing the original and regridded data will be created (eg. two subplots, one showing the original and one showing the regridded data).
+
+* The purpose of this function is to be able to efficiently apply regrid for different sizes without having to repeat the data organisation: No new code is needed compared to the tutorial, just conversion to a function.
+
+* Hint: You could use the plot_map function from the tutorial to simplify the plotting part.
+```{r}
+#function to create a dataframe from a list
+create_df_from_lists <- function(clean_input){
+  lon_vec = rep(clean_input$lon,length(abs_tem$lat))
+  lat_vec = rep(clean_input$lat,each=length(abs_tem$lon))
+  tem_vec = as.vector(clean_input$tem[,,1]) # Regrid the January slice
+  df = data.frame(x=lat_vec,y=lon_vec,z=tem_vec)
+  return(df)
+}
+
+#function to create lists from a dataframe
+create_lists_from_df <- function(input_df){
+  lat_list = unique(input_df$x)
+  lon_list = unique(input_df$y)
+  tem_list = matrix(nrow = length(lon_list),ncol=length(lat_list))
+  for (n in 1:length(lon_list)){ 
+    # Convert the regridded temp vector to a matrix
+    istart = (n-1)*length(lat_list)+1
+    iend = n*length(lat_list)
+    tem_list[n,] = input_df$z[istart:iend]
+    }
+  output_list = list(lon=lon_list,lat=lat_list,tem=tem_list) 
+  return(output_list)
+}
+
+#function to plot
+plot_map = function(lon,lat,data,
+                    ylim=c(-90,90),xlim=c(-180,180), # Default is the whole globe
+                    cmap=rev(brewer.pal(10,"RdBu")), # Default colour scale
+                    title="Plot", # Default plot title
+                    FLIP = TRUE
+                    ){
+  
+  r = raster(t(data), xmn=min(lon), xmx=max(lon), ymn=min(lat), ymx=max(lat), crs=CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs+ towgs84=0,0,0"))
+  if (FLIP){
+  r = flip(r, direction='y') 
+  } 
+  plot(r,ylim=ylim,xlim=xlim,main=title,col=cmap)
+  plot(coastsCoarse,add=TRUE,col='black') 
+}
+```
+
+
+```{r}
+abs_df <- create_df_from_lists(abs_tem)
+
+regrid_wrapper <- function(input,n1,n2,idp,nmax,plotresults=TRUE,method="idw",original_list,month_number){
+  # Function body
+  input_regrid = regrid(
+    input,
+    n1 = n1,
+    n2 = n2,
+    method = method,
+    idp = idp,
+    nmax = nmax)
+  if (plotresults){
+    par(mar=c(2,4,1,1)) # set plotting margins
+    par(mfrow=c(2,1)) # Create subplots
+    input_regrid_list <- create_lists_from_df(input_regrid)
+    input_list <- create_lists_from_df(input)
+    #plot original data
+    plot_map(lon=original_list$lon,lat=original_list$lat,data=original_list$tem[,,month_number],title=paste0("Original: Mean January temperature"))
+    plot_map(lon=input_list$lon,lat=input_list$lat,data=input_regrid_list$tem,title=paste0("Original: Mean January temperature with nmax ",nmax," and idp",idp))
+    }
+  #return(input_regrid)
+}
+
+```
+
+Use the function to investigate the results of regridding to a 150*150 grid with idp of 0.01, 1, 100 (test with nmax=10) and nmax of 1, 10, 25 (test with idp=1). Write a brief description of the impact of these two parameters on the regridding. 
+
+* It will be helpful if you print values of n1,n2,idp,nmax on the plots output by your regrid_wrapper function.
+
+```{r}
+# Choose a month of data (eg. January) and use regrid_wrapper to investigate the impact of nmax and idp on the regridding
+
+#investigate nmax
+regrid_wrapper(input = abs_df,n1=150,n2=150,idp=1,nmax=1,plotresults=TRUE,method="idw",original_list= abs_tem,month_number=1)
+
+regrid_wrapper(input = abs_df,n1=150,n2=150,idp=1,nmax=10,plotresults=TRUE,method="idw",original_list= abs_tem,month_number=1)
+
+regrid_wrapper(input = abs_df,n1=150,n2=150,idp=1,nmax=25,plotresults=TRUE,method="idw",original_list= abs_tem,month_number=1)
+
+#investigate with idp
+regrid_wrapper(input = abs_df,n1=150,n2=150,idp=0.01,nmax=10,plotresults=TRUE,method="idw",original_list= abs_tem,month_number=1)
+
+regrid_wrapper(input = abs_df,n1=150,n2=150,idp=1,nmax=10,plotresults=TRUE,method="idw",original_list= abs_tem,month_number=1)
+
+regrid_wrapper(input = abs_df,n1=150,n2=150,idp=100,nmax=10,plotresults=TRUE,method="idw",original_list= abs_tem,month_number=1)
+```
+
+*What is the impact of idp and nmax?*
+idp (Interpolation Degree) determines the polynomial degree used for interpolation. Higher values capture more complexity but may introduce noise, while lower values provide smoother results.
+
+nmax (Maximum Number of Neighbors) specifies the maximum number of nearby data points used for interpolation. Higher values increase accuracy but may introduce noise, while lower values provide smoother output. Choose based on data density and desired accuracy.
+
+# Temperature anomaly data
+
+Import the global temperature anomaly data in **HadCRUT.4.6.0.0.median.nc**. What variables, dimensions and attributes are present in this dataset?
+
+```{r}
+# Open the nc file and dump to look at the summary
+# Import the data as in the tutorial
+nc_data = nc_open('./data/HadCRUT.4.6.0.0.median.nc') # Open the file to read the netcdf data
+print(nc_data) # Runs an "nc dump" to show a summary of the file
+
+lon <- ncvar_get(nc_data, "longitude")
+print(paste0("longitudes:"))
+head(lon) # show the start of the lon data vector
+
+print(paste0("latitudes:"))
+lat <- ncvar_get(nc_data, "longitude", verbose = F)
+head(lat) # show the start of the lat data vector
+
+print(paste0("months:"))
+time_values <- ncvar_get(nc_data, "time")
+head(time_values) # show the start of the time data vector
+
+print(paste0("dimensions for temperature: lon, lat, time"))
+tem <- ncvar_get(nc_data, "temperature_anomaly")
+dim(tem) # temperature has dimensions of lon,lat,month
+```
+
+* Extract lon, lat, time and temperature anomaly as well as the fill value
+
+* Use the attributes on the time variable to convert it to a timestamp (Hint: What does the time represent?)
+
+* Replace filled temperature anomaly data with NaNs 
+
+* Combine the selected data into a list
+
+```{r}
+# Extract and clean the required data
+fillvalue <- ncatt_get(nc_data, "temperature_anomaly", "missing_value", verbose="F")
+fillvalue
+fillvalue <- -1.00000001504747e+30
+
+nc_close(nc_data) # We have the data so we can close the netcdf file
+sum(tem == fillvalue) # See how many missing values there are
+tem[tem == fillvalue] = NaN
+
+#correct time stamps
+correct_time_to_months <- function(time_values){
+    # Round the time values to the nearest integer
+    rounded_time_values <- round(time_values)
+    
+    # Define the reference date as POSIXct object
+    reference_date <- as.POSIXct("1961-01-01 00:00:00", tz = "UTC")
+    
+    # Create an empty vector to store the timestamps
+    months <- vector("list", length(time_values))
+    
+    # Loop through each time value and convert it into a timestamp
+    for (i in 1:length(rounded_time_values)) {
+      timestamp <- reference_date + days(rounded_time_values[i])
+      months[[i]] <- month(timestamp)
+    }
+    
+    # Print the list of timestamps
+    return(months)
+}
+
+time_values <- correct_time_to_months(time_values)
+abs_tem <- list(lat=lat,lon=lon,tem=tem,time=time_values)
+```
+```{r}
+
+```
+
+
+# Correlations between temperature anomaly and other variables
+
+Look at the dimensions of our two datasets (mean temperature and temperature anomaly. If regridding is required to compare the two datasets, regrid the mean temperature data.
+
+```{r}
+# Regrid if needed
+
+```
+
+We will consider correlations between temperature anomaly in June and December 2015 and the variables longitude, latitude, absolute latitude, and mean temperature. 
+
+* Select these slices and plot scatterplots between the four variables (longitude, latitude, absolute latitude, mean temperature) and the temperature anomalies for June and December 2015. 
+
+* Use 4 x 2 subplots for this, so that all comparisons are included in one figure. 
+
+* Normalise the data to between 0 and 1 before analysing, so that slopes are comparible between different variables. 
+
+* Include the linear fit as a line on the scatter plot. 
+
+* Save the slopes and p-values for the linear fits as well as the Pearson correlation coefficients.
+
+```{r}
+# Carry out the comparisons between temperature anomaly and the desired variables.
+
+```
+
+What patterns can you see in the data you have plotted?
+
+* Which variable has the largest slope for the relationship with temperature anomaly? Which slope has the highest significance (lowest p)?
+
+*Result* 
+
+* Which variable has the closest relationship to temperature anomaly (highest Pearson correlation coefficient)?
+
+*Result*
+
+* Looking at the shapes of the curves, are there other transformations or processing approaches you would apply to the data to further investigate relationships?
+
+*Result*
+
+* Can you see evidence for rapid Arctic warming in your plots? See https://eos.org/science-updates/understanding-causes-and-effects-of-rapid-warming-in-the-arctic for more information.
+
+*Result*
+
+# Summary
+
+In this exercise you have learnt:
+
+* How to import and investigate .nc data
+
+* Regridding and smoothing geographical data
+
+* Using a wrapper function to streamline feeding data in and out of another function
+
+* Investigating linear correlations between different parameters

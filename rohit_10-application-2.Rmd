@@ -1,0 +1,809 @@
+---
+title: "10: Application 2"
+author: "Rohit Koonireddy"
+date: "2022-11-15"
+output: html_document
+html_document: default
+---
+
+# Application 2: Neural Networks and Hyperparameter Tuning {#ch-11}
+
+The goal of this application is to put the basics of Neural Networks (NNs) that we covered over these weeks into practice. The task at hand is to predict the productivity of vegetation (`GPP_NT_VUT_REF`), using Multi Layer Perceptrons (MLPs). For this task we will be using the dataset `FLX_CH-Lae_FLUXNET2015_FULLSET_HH_2004-2014_1-3_CLEAN`, that has been preprocessed and cleaned to some extent. 
+
+
+## Introduction
+
+### Learning goals 
+
+After this application you will be able to: 
+
+- Create training, validation and testing splits (70/15/15)
+- Center and scale your data features (pre-processing) based on training statistics 
+- Use the validation set for hyper-parameter tuning and model selection (note that in many cases, those are synonims)
+- Build and train a MLP NN for regression tasks, with 1 and 2 hidden layers
+- Search best configuration over the number of neurons
+
+### Key points to keep in mind 
+
+- To train a statistical model using machine learning, we split our data into training, validation and testing sets. If we do not have enough data, we can use $k$-fold cross-validation schemes to replace the validation set, and, in some extreme cases, the test set as well. 
+- Test data is set aside at the initial split and never ever used during model training nor hyperparameter and model selection. It is only used when we want to assess how well a model generalizes to previously unseen data, and only for that. 
+- Validation data is used to monitor the loss during model training. The training loss will often decrease no matter what, as NNs are very powerful (universal) approximators. The validation set mimics a held out set (i.e., it mimics a test set) to see how the different configurations of our model generalize over some held-out data. Held-out, means not used to optimize model parameters (remember the difference between _parameter_ and _hyperparameter_).
+- Machine learning algorithms have hyperparameters. These are parameters that are set by the user rather than learned during training. An example is the learning rate in gradient descent. In the case of Artificial Neural Networks, this can be the number of nodes per hidden layer, or the number of hidden layers. 
+- Loss is a measure of how well our trained model fits training labels. Loss is high when predictions are poor. Loss is low when predictions are good.
+- Model training minimizes the loss. In other words, it maximizes the agreement between predicted and observed values. The loss over the validation set is a passive (i.e., not directly optimized) measure of agreement over the held out set. We've seen that for regression, most common losses are accuracy (or error) measures, while for classification it might be more involved. No worries, here we do regression. 
+- There are several ways to measure loss. RMSE (Root Mean Squared Error) or MSE are such measures. It is used in regression problem, as it is smooth and differentiable everywhere. Another common measure of error (which cannot be used as optimisation objective function) is the MAE or mean absolute error. 
+- To tune a model, you can set hyperparameters that determine model structure or calibrate the coefficients. 
+
+## Application
+
+### Problem Statement 
+
+For this application we can use the reduced and cleaned dataset with half-hourly data `FLX_CH-Lae_FLUXNET2015_FULLSET_HH_2004-2014_1-3_CLEAN.csv`. The task is to predict the *productivity of vegetation (GPP)*, using all the other features as predictor variables.
+
+`GPP_NT_VUT_REF` from the dataset is the target variable and rest of the columns can be used as the input predictor variables. 
+
+- Use these inputs for a neural network with just one hidden layer.
+- Check training, validation and test metrics to understand their agreement and see whether the split is appropriate for the task.
+- Use the validation set to optimize hyper-parameters such as number of neurons, number of layers, choice of activation function etc...
+- Use MSE loss as a metric for monitoring the performance, plot the MSE loss as a function of the number of epochs.
+- Plot the MSE as a function of the hyperparameters used.
+- And some more specific steps. 
+- At the end of this application, there are some pointers that can be further explored but are not part of the application requirements. 
+
+### Data preparation 
+
+```{r message=FALSE, warning=FALSE}
+## Loading the required libraries 
+library(reticulate)
+#use_condaenv('r-reticulate')
+library(keras)
+library(tensorflow)
+library(caret)
+library(tidyverse)
+library(recipes)
+```
+
+
+```{r}
+### Read in the .csv file as a dataframe 
+data_bird <- read.csv2("data/FLX_CH-Lae_FLUXNET2015_FULLSET_HH_2004-2014_1-3_CLEAN.csv",sep = ",",dec = ".")
+
+### Things to check when preprocessing 
+# Look at the structure and shape of the data (print it out using str())
+str(data_bird)
+# Convert time-stamp columns from strings to datetime object using as.POSIXct()
+data_bird$TIMESTAMP_START <- as.POSIXct(data_bird$TIMESTAMP_START, format = "%Y-%m-%dT%H:%M:%S")
+data_bird$TIMESTAMP_END <- as.POSIXct(data_bird$TIMESTAMP_END, format = "%Y-%m-%dT%H:%M:%S")
+
+# As we treat the observations as IID, we don't really need the time-stamp values as a feature variable, but we still retain them as they will be used for some time series plots later. 
+
+### Check the structure of your data again (print it out using str())
+str(data_bird)
+head(data_bird)
+```
+
+We now remove all the rows where the _target_ variable is NA. As the target `GPP_NT_VUT_REF` is missing, we cannot learn or test against this data, so we remove all the rows where the target variable is missing. If we are happy with the model, we could go back to these missing rows data and use our MLP to impute (i.e., interpolate) missing `GPP_NT_VUT_REF` values. The variables `NIGHT`, `NEE_VUT_REF_QC` do not carry any additional information for this application, and we can drop them from our dataframe.
+
+```{r}
+## Drop rows with NAs for GPP_NT_VUT_REF, and discard the columns NEE_VUT_REF_QC and NIGHT
+data_bird <- data_bird[!is.na(data_bird$GPP_NT_VUT_REF), ]
+data_bird <- data_bird[, !(names(data_bird) %in% c("NEE_VUT_REF_QC", "NIGHT"))]
+
+## Print the dimensionality of the data frame now to check how many rows have been deleted, and the num of columns remaining 
+cat("Number of rows:", nrow(data_bird), "\n")
+cat("Number of columns:", ncol(data_bird), "\n")
+
+## Print the summary() of your dataframe for some more information about your variables
+summary(data_bird)
+
+```
+
+We see that there are still a few variables with NA values. Let's see how many NAs each column has and what would be the number of rows in the resulting dataframe if we drop all rows with NAs 
+
+```{r}
+## Compute how many rows have NA values for each column, and report the result for each column, print the result 
+# e.g. 
+# TIMESTAMP_START                 0
+# TIMESTAMP_START0TIMESTAMP_END   0
+# TA_F                            abc
+# .
+# . 
+# . 
+# RH                           xyz
+
+na_counts <- colSums(is.na(data_bird))
+print("Number of NA values for each column:")
+print(na_counts)
+
+## Compute the rows we will be left with, if we drop all rows where even 1 column contains NA, print the result
+rows_after_dropping_na <- nrow(data_bird[complete.cases(data_bird), ])
+cat("Number of rows remaining after dropping rows with any NA values:", rows_after_dropping_na, "\n")
+```
+
+The number of rows with NA values are not that large compared to the current size of the dataset. So we can afford to discard these rows without reducing the size of our dataset by much, and we still have enough data to carry out analysis. 
+
+*Sidenote:* It can happen in some cases that by doing so we lose a majority of our dataset, because each row has at least 1 column with NA. If the number of rows reduced significantly by this operation, we would use some data imputation technique to fill-in these NA values. But also note that by doing so, we are introducing some bias to our model, by the data imputation technique we choose. A common strategy is to either use models that can work also with missing values, or drop columns with many NAs, inpute others, and check what combinations provide good validation accuracy. This "preprocessing" step counts as _model selection_. 
+
+```{r}
+## Drop all the rows with NAs
+data_bird <- na.omit(data_bird)
+
+## Create variables for reference
+time_cols <- c("TIMESTAMP_START", "TIMESTAMP_END")
+target_variable <- "GPP_NT_VUT_REF"
+column_names <- colnames(data_bird)
+## time stamp columns and the target variables are not used as predictors
+predictors <- column_names[!column_names %in% c(target_variable, time_cols)]
+
+## Print the dimensionality of the data frame after dropping rows
+cat("Number of rows remaining after dropping rows with any NA values:", nrow(data_bird), "\n")
+cat("Number of columns:", ncol(data_bird), "\n")
+```
+```{r}
+column_names <- colnames(data_bird)
+column_names
+```
+Next, we create indices to split the entire dataset into train, validation and test (70/15/15) splits. 
+
+The 70% of our data will be used to train the models. The rest 30% will be our held-out validation and test sets: the former to select best architecture and hyperparameters and the latter to evaluate the generalization performance of the model, as if we were to apply it to a new, unseen, dataset.  
+
+This dataset is actually a time series, so data in principle should be split into temporally disjoint learning sets. However, this is true if the main task is to develop _predictive_ models, which extrapolate outside the training data domain. For instance, one would like to predict in the future `GPP` given other variables that might be simulated by weather models. 
+
+However, in this application, we rephrase the problem as _interpolating_ in the training data: we want to fill missing values of our target variable, so we want to learn a model that generalises well over the training data domain. The interested person is encouraged to redo this application by splitting train, validation and test as disjoint learning sets. They are also encouraged to check the statistical distributions (eg scatterplot, histograms) of the different sets and see what happens! 
+
+To be fully honest, _interpolation_ model reduces a lot of complications, while still being a crucial example for many real world applications! 
+
+Let's plot the time series of our target, just because. 
+
+```{r}
+# Set the seed for reproducibility
+set.seed(123)
+
+# Create indices for train, validation, and test sets (70/15/15)
+n <- nrow(data_bird)
+train_indices <- sample(1:n, 0.7 * n)
+remaining_indices <- setdiff(1:n, train_indices)
+validation_indices <- sample(remaining_indices, 0.5 * length(remaining_indices))
+test_indices <- setdiff(remaining_indices, validation_indices)
+
+# Create train, validation, and test sets
+train_set <- data_bird[train_indices, ]
+validation_set <- data_bird[validation_indices, ]
+test_set <- data_bird[test_indices, ]
+
+# Plot the time series of the target variable
+library(ggplot2)
+
+p_tr <- ggplot(train_set, aes(x = TIMESTAMP_START, y = GPP_NT_VUT_REF)) +
+  geom_line() +
+  labs(title = "Time Series of GPP_NT_VUT_REF for training set",
+       x = "Timestamp",
+       y = "GPP_NT_VUT_REF")
+
+print(p_tr)
+
+t_tr <- ggplot(test_set, aes(x = TIMESTAMP_START, y = GPP_NT_VUT_REF)) +
+  geom_line() +
+  labs(title = "Time Series of GPP_NT_VUT_REF for test set",
+       x = "Timestamp",
+       y = "GPP_NT_VUT_REF")
+
+print(t_tr)
+
+v_tr <- ggplot(validation_set, aes(x = TIMESTAMP_START, y = GPP_NT_VUT_REF)) +
+  geom_line() +
+  labs(title = "Time Series of GPP_NT_VUT_REF for validation set",
+       x = "Timestamp",
+       y = "GPP_NT_VUT_REF")
+
+print(v_tr)
+```
+```{r}
+## Set seed for reproducibility
+set.seed(123)
+
+## First shuffle the dataset
+shuffled_data_bird <- data_bird[sample(nrow(data_bird)), ]
+
+## Get indices for train, validation, and test splits
+n <- nrow(shuffled_data_bird)
+train_indices <- sample(1:n, 0.7 * n)
+remaining_indices <- setdiff(1:n, train_indices)
+validation_indices <- sample(remaining_indices, 0.5 * length(remaining_indices))
+test_indices <- setdiff(remaining_indices, validation_indices)
+
+## Use the indices to get train, validation, and test splits
+train_data <- shuffled_data_bird[train_indices, ]
+validation_data <- shuffled_data_bird[validation_indices, ]
+test_data <- shuffled_data_bird[test_indices, ]
+```
+
+
+Next we separate the target variable from the predictors. 
+```{r}
+
+# Save time stamps for the test and train splits, as a separate data frame for time-series plots 
+trn_target <- train_data$GPP_NT_VUT_REF
+trn_data <- train_data[, !(names(train_data) %in% c("GPP_NT_VUT_REF", "TIMESTAMP_START", "TIMESTAMP_END"))]
+
+val_target <- validation_data$GPP_NT_VUT_REF
+val_data <- validation_data[, !(names(validation_data) %in% c("GPP_NT_VUT_REF", "TIMESTAMP_START", "TIMESTAMP_END"))]
+  
+tst_target <- test_data$GPP_NT_VUT_REF
+tst_data <- test_data[, !(names(test_data) %in% c("GPP_NT_VUT_REF", "TIMESTAMP_START", "TIMESTAMP_END"))]
+
+# Separate the splits to get trn_data, trn_target; val_data, val_target; test_data and val_target. After this you should have 6 corresponding dataframes, one per learning set. Also drop the time stamp columns from the train data and test data as we treat the observations as IID. (we keep them for plots)
+trn_timestamps <- train_data[, c("TIMESTAMP_START", "TIMESTAMP_END")]
+tst_timestamps <- test_data[, c("TIMESTAMP_START", "TIMESTAMP_END")]
+val_timestamps <- validation_data[, c("TIMESTAMP_START", "TIMESTAMP_END")]
+
+## Print the head of tst_data to check the structure
+head(tst_data)
+```
+
+### Center and scale
+
+Take care to extract the centering and scaling parameters from the training set and use them to center and scale your validation and test data!
+
+If you use the entire data set to get the centering and scaling parameters, we actually use some information from the test data, which is something we generally do not have access to in real life. Thus doing so could result in _information leakage_ from the test data into the training set, and we may get results more optimistic than our model's predictions on actually unseend data. Follow the steps below to carry out centering and scaling in a proper way: 
+
+- Extract normalization parameters from _train_ data for numeric predictors
+- Normalize train data using these parameters
+- Normalize test data using the parameters extracted from _train_ data
+- Generally we only normalize the numeric variables and not the factors
+
+Plots the `summary()` of the different sets and compare statistcis.
+```{r, eval=F}
+## Make use of preProcess() logic or any other function you wish, to scale and center each of the columns. Also store mean, sd manually and rescale sets is easy enough. 
+
+print("trn data")
+summary(trn_data)
+print("val data")
+summary(val_data)
+print("tst data")
+summary(tst_data)
+```
+
+Are all of the columns in the training, validation and test set centered perfectly with to the same mean of 0? Why? 
+
+Note that in some cases, we can also rescale the target variable. For instance, to make the distribution more "normal" like, or to range values from only positives to also negative (e.g., with a log transform). Those situations are to be understood by data exploration, and, in case of doubts, can also be seen as model selection steps. Just be sure to transform back to the original data scale the target, before computing the error! 
+
+```{r}
+## Make use of preProcess() logic or any other function you wish to scale and center each of the columns.
+## Also store mean, sd manually, and rescale sets is easy enough.
+
+# Extract normalization parameters from train data for numeric predictors
+scaling_parameters <- preProcess(trn_data, method = c("center", "scale"))
+
+# Normalize train data using these parameters
+trn_data_scaled <- predict(scaling_parameters, newdata = trn_data)
+
+# Normalize validation data using the parameters extracted from train data
+val_data_scaled <- predict(scaling_parameters, newdata = val_data)
+
+# Normalize test data using the parameters extracted from train data
+tst_data_scaled <- predict(scaling_parameters, newdata = tst_data)
+
+# Print summary statistics
+cat("Summary Statistics - Train Data\n")
+summary(trn_data_scaled)
+
+cat("Summary Statistics - Validation Data\n")
+summary(val_data_scaled)
+
+cat("Summary Statistics - Test Data\n")
+summary(tst_data_scaled)
+```
+### Building a simple model with keras (again)
+Remember that keras wants input data to be first cast matrix or arrays. Since all our features are numeric, we can safely convert the train and test datasets to matrices.
+```{r}
+# Load the necessary libraries
+library(tensorflow)
+library(keras)
+
+# Start the TensorFlow session
+#tf$reset_default_graph()
+k_clear_session()
+
+# Convert the learning sets (features and targets) to matrices
+trn_data_matrix <- as.matrix(trn_data_scaled)
+val_data_matrix <- as.matrix(val_data_scaled)
+tst_data_matrix <- as.matrix(tst_data_scaled)
+
+# Define and compile the model
+model <- keras_model_sequential() %>%
+  layer_dense(units = 20, input_shape = ncol(trn_data_matrix), activation = "relu") %>%
+  layer_dense(units = 1, activation = "linear")
+
+# Print the summary of the model
+summary(model)
+
+# Compile the model
+model %>% compile(
+  optimizer = optimizer_adam(),
+  loss = "mean_squared_error",
+  metrics = list("mean_absolute_error", "mean_squared_error")
+)
+
+# Set up TensorBoard callback
+tensorboard_callback <- callback_tensorboard(log_dir = "logs/fit/")
+
+# Fit the model and store the fit output into a training history
+history <- model %>% fit(
+  x = trn_data_matrix,
+  y = trn_target,
+  epochs = 50,  # You can choose an appropriate number of epochs
+  batch_size = 128,  # You can choose a suitable batch size
+  validation_data = list(val_data_matrix, val_target),
+  callbacks = list(
+    callback_early_stopping(patience = 5),
+    tensorboard_callback
+  )
+)
+
+# Plot training history
+plot(history)
+
+# Get weights of the model
+get_weights(model)
+```
+
+Check tensorboard view here: http://localhost:6006/ 
+
+Now we can build a sequential model with keras. Define a model with 1 hidden layer with 20 units, and 1 output unit, for the target variable. Remember to specify a non-linear activation such as `Tanh` or `ReLU` for the hidden layer, and a linear activation function for the output unit (as it is a regression task!). If we don't specify a non-linear activation we will just be training a linear mapping and we have seen that there are no benefits of stacking layers.
+
+When compiling the model take care to use appropriate optimizer, loss and evaluation metric. Use mean squared error as the loss, and mean absolute error and mean squared errors as the evaluation metric (pass them as a `list()`). There are some optimisers that can be used out of the box, among those, standard one are vanilla SGD `optimizer_sgd()` or ADAM `optimizer_adam()`. In our applications, as networks are small and relatively shallow, we are fine with those. Use `ADAM` just to be on the fast side of things. [Some more info here, for instance](https://medium.com/geekculture/a-2021-guide-to-improving-cnns-optimizers-adam-vs-sgd-495848ac6008) or similar, just google it. 
+
+*Side Note*: Since our model is not very deep in this application, we can use most of the nonlinearities successfully. In practice, when we train deep neural networks (with a large number of hidden layers) we prefer to use ReLU or similar non-saturating functions as the activation function, as it does not suffer from the problem of Vanishing or Exploding gradients. The gradient of those functions becomes infinitesimally small for very large or very small values, which could generate issues. In a network of $L$ hidden layers, $L$ derivatives will be multiplied together. If the derivatives are large then the gradient will increase exponentially as we propagate down the model until they eventually explode, and this is what we call the problem of exploding gradient. Alternatively, if the derivatives are small then the gradient will decrease exponentially as we propagate through the model until it eventually vanishes, and this is the vanishing gradient problem.
+
+How many training parameters are needed? Can you account for the total number of parameters at each layer?
+The network needs 341 parameters. These are split as Layer 1: 320 parameters – (20x15) weight and (20x1) bias matrix, and Layer 2: 21 parameters – (20x1) weight matrix and (1x1) bias unit.
+
+Fit the model and store the `fit()` output into a training history. Use a reasonable batch_size, epochs, and pass validation data as a `list(val_data, val_target)`. The validation data is only used to evaluate the loss and evaluation metric at the end of each epoch. The model will run in _ evaluation_  or _inference_ mode on these datapoints and will never participate in optimizing model _parameters_. Besides checking the final model accuracy for a given set of hyperparametes to be chosen, this is useful for stopping training after a certain number of epochs if we see the validation error increasing with training. We can also program the model to do so, this is called Early Stopping. This can be done by using a training callback for early stopping: `callback_early_stopping()`, where we can pass the argument `patience=C` to stop training if there is no improvement after $C$ epochs. 
+
+More info on `callbacks`: https://keras.rstudio.com/articles/training_callbacks.html
+More info on `fit` function: https://keras.rstudio.com/reference/fit.html
+
+
+Now that the model training is complete we can look at the history, as provided by keras. Just `plot(history)` to plot it. Also, look at our trained weights. Pay attention to the trained weight matrices and try to recognize the transformation weights and the bias units. 
+
+```{r}
+plot(history)
+
+# Get weights of model
+get_weights(model)
+```
+
+Now we can evaluate our model predictions on the held-out testing set, and compare it to the validation set to see if we are close (ballpark) so we can see if the val set is a good proxy for it. So that we do not need to compute the test score at every step, but keep in mind that it should be done! 
+
+```{r}
+# make predictions and evaluate using validation set 
+# Evaluate using validation set
+eval_result_val <- model %>% evaluate(val_data_matrix, val_target)
+print("Validation Set Evaluation:")
+print(eval_result_val)
+
+# Evaluate using test set
+eval_result_test <- model %>% evaluate(tst_data_matrix, tst_target)
+print("Test Set Evaluation:")
+print(eval_result_test)
+
+# Plot predictions for test set
+tst_data_predictions <- predict(model, tst_data_matrix)
+
+plt_test <- ggplot() + 
+  geom_line(data = tst_data, aes(x = test_data$TIMESTAMP_START, y = tst_data_predictions), col = alpha("red", 0.5)) + 
+  geom_line(data = tst_data, aes(x = test_data$TIMESTAMP_START, y = tst_target), col = alpha("blue", 0.15)) +
+  xlab("Time of observation") +
+  ylab("Prediction and observation") +
+  labs(title = "Test data")+
+  theme(legend.position = "top")
+
+print(plt_test)
+
+# Plot predictions for validation set
+val_data_predictions <- predict(model, val_data_matrix)
+
+plt_val <- ggplot() + 
+  geom_line(data = val_data, aes(x = validation_data$TIMESTAMP_START, y = val_data_predictions), col = alpha("red", 0.5)) + 
+  geom_line(data = val_data, aes(x = validation_data$TIMESTAMP_START, y = val_target), col = alpha("blue", 0.15)) +
+  xlab("Time of observation") +
+  ylab("Prediction and observation") +
+  labs(title = "Validation data")+
+  theme(legend.position = "top")
+
+print(plt_val)
+
+```
+Nice! From our domain knowledge we know that the target variable `GPP_NT_VUT_REF` cannot be negative, but our dataset contains some negative observations because of noisy measurements. From the plot we see that the model learns the trends in the data, without learning the noise. Learning the noise, would go towards overfitting our data. We could even think about smoothing the data first, but this would inject bias so needs to be done very carefully, 
+
+Finally let's make a plot of our predictions v/s observed data, and we can add a 1:1 line. In an ideal world this should be a straight line $y=x$, giving us a Pearson's correlation coefficient of 1, but because of the noise in data we can expect some deviations from the ideal result. 
+
+What is the $R^2$ score (the squared Pearson's correlation coefficient)? 
+
+```{r}
+## compute the correlation coefficient
+correlation_coefficient <- cor(tst_target, tst_data_predictions)
+r_squared <- correlation_coefficient^2
+r_squared
+```
+
+Having done this we have an idea of how well our model generalizes against unseen data. But, to optimize the hyperparameters of the network we know for many reasons we should not use the performance on the test set to select these, that is why we use a validation set. 
+
+Write a function, that does all the above steps, and returns a trained model (contained in the `fit()` output variables).
+
+```{r}
+# Function name: build_model()  
+# Inputs: Training data, Training target, number of hidden units, activation type, number of epochs, batch size and validation size  
+# Output: List of 2 objects --> trained model, and the training history 
+## We also return the training history in case we want to make plots of the training process for each of the folds  
+# Function to build and train the model
+k_clear_session
+build_model <- function(X_trn, y_trn, X_val, y_val, num_units, activation_type, num_epochs, batch_size) {
+  # Define the model
+  model <- keras_model_sequential() %>%
+    layer_dense(units = num_units[1], input_shape = ncol(X_trn), activation = activation_type[1]) %>%
+    layer_dense(units = 1, activation = "linear")
+
+  # Compile the model
+  model %>% compile(
+    optimizer = optimizer_adam(),
+    loss = "mean_squared_error",
+    metrics = list("mean_absolute_error", "mean_squared_error")
+  )
+  
+  summary(model)
+  # Set up TensorBoard callback
+  tensorboard_callback <- callback_tensorboard(log_dir = "logs/fit/")
+
+  # Fit the model
+  history <- model %>% fit(
+    x = X_trn,
+    y = y_trn,
+    epochs = num_epochs,
+    batch_size = batch_size,
+    validation_data = list(X_val, y_val),
+    callbacks = list(
+      callback_early_stopping(patience = 5),
+      tensorboard_callback
+    )
+  )
+
+  return(list("model" = model, "history" = history))
+}
+
+```
+
+### Example usage:
+### Set your hyperparameters
+```{r}
+# num_hidden_units <- c(20)  # Number of units in each hidden layer
+# activation_types <- c("relu")  # Activation type for each hidden layer
+# num_epochs <- 50
+# batch_size <- 32
+```
+
+
+## Model selection and hyperparameters search
+
+### 1 Layer
+
+Here we need to write a loop that goes over a number of parameters for the number of units in the hidden layer of our model. We train the model until we are happy, and take the last value of the history for the validation means squared error. We store that in an array that we gonna inspect later. 
+
+Define a vector of `num_units` for tuning the number of hidden units, as `c(1,3,10,30,100)`. Store the validation scores in a `1 x length(num_units)` empty array `val_scores_1h`, where `_1h` indicates that we have 1 hidden layer. 
+
+```{r message=FALSE, warning=FALSE}
+# Set the vector of num_units for tuning
+num_units <- c(1, 3, 10, 30, 100)
+
+# Initialize an empty array to store validation scores
+val_scores_1h <- numeric(length(num_units))
+
+# Loop over num_units and train the model
+for (i in seq_along(num_units)) {
+    print(paste("printing for", {i},"model"))
+  # Build and train the model
+  model_result <- build_model(trn_data_matrix, trn_target, val_data_matrix, val_target,
+                              num_units = c(num_units[i]), activation_type = c("relu"),
+                              num_epochs = 50, batch_size = 128)
+
+  # Get the validation mean squared error from the last epoch
+  val_mse <- tail(model_result$history$metrics$val_mean_squared_error, 1)
+
+  # Store the validation score
+  val_scores_1h[i] <- val_mse
+}
+
+# Plot the validation scores
+plot(num_units, val_scores_1h, type = "b", xlab = "Number of Hidden Units",
+     ylab = "Validation Mean Squared Error", main = "Tuning Number of Hidden Units")
+print(val_scores_1h)
+
+```
+
+```{r}
+num_units = c(1,3,10,30,100)
+plot(num_units, val_scores_1h, type = "b")
+print(val_scores_1h)
+```
+
+Find the `num_units` that provides the lowest validation error. 
+```{r}
+## What is the number of hidden units that gives the minimum loss ? 
+# Find the num_units that provides the minimum validation error
+best_num_units <- num_units[which.min(val_scores_1h)]
+print(paste("Best Number of Hidden Units:", best_num_units))
+```
+What is the most practical number of hidden units in your opinion, for a model with 1 hidden layer? (Consider the trade-off between the reduction in MSE loss with the increase in hidden units and the increase in training / compute time and model complexity, and number of parameters to be learnt). 
+ - In terms of effeciency and generalization, I would go with 30 parameter model too. As the number of parameters increase, the possibility of "remembering" the data also increases. To avoid this, I also used early stop function where validation loss increases consistently for 5 epochs.
+
+As one might suspect network with 100 hidden units gives the minimum loss, but it is only marginally better than a network with 30 hidden units. So, one might consider using 30 hidden units as it gives a reasonable trade-off between model complexity and the cross validation loss. Also note that if we decrease the model complexity too much, the loss on cross-validation increases significantly. 
+
+At this point, in real applications, we would merge training and validation sets, retrain the best model we found, and compute a test score. Feel free to test it out in your free time (I know, I am assuming you do not have anything better to do). 
+
+Let's say that the layer size we just tuned, is good enough with 30 neurons. Can we do the same, but tuning a _second_ hidden layer we add to our model? 
+
+Just reuse the function you wrote above, name it `build_deeper_model()`, and redo the same loop but now optimizing the number of units in the second layer. 
+```{r}
+# Function name: build_model()  
+# Inputs: Training data, Training target, number of hidden units, activation type, number of epochs, batch size and validation size  
+# Output: List of 2 objects --> trained model, and the training history 
+## We also return the training history in case we want to make plots of the training process for each of the folds  
+# Function to build and train a model with two hidden layers, tuning the number of units in the second layer
+k_clear_session
+build_deeper_model <- function(X_trn, y_trn, X_val, y_val, num_units, activation_type, num_epochs, batch_size) {
+  # Define the model
+  model <- keras_model_sequential() %>%
+    layer_dense(units = num_units[1], input_shape = ncol(X_trn), activation = "relu") %>%
+    layer_dense(units = num_units[2], activation = "relu") %>%
+    layer_dense(units = 1, activation = "linear")
+
+  # Compile the model
+  model %>% compile(
+    optimizer = optimizer_adam(),
+    loss = "mean_squared_error",
+    metrics = list("mean_absolute_error", "mean_squared_error")
+  )
+  
+  summary(model)
+  # Set up TensorBoard callback
+  tensorboard_callback <- callback_tensorboard(log_dir = "logs/fit/")
+
+  # Fit the model
+  history <- model %>% fit(
+    x = X_trn,
+    y = y_trn,
+    epochs = num_epochs,
+    batch_size = batch_size,
+    validation_data = list(X_val, y_val),
+    callbacks = list(
+      callback_early_stopping(patience = 5),
+      tensorboard_callback
+    )
+  )
+
+  return(list("model" = model, "history" = history))
+}
+
+# Example usage for tuning the second hidden layer
+num_units_2h_1f <- c(10, 30, 50)
+val_scores_2h_1f <- numeric(length(num_units_2h_1f))
+
+# Loop over num_units_2h_1f and train the model
+for (i in seq_along(num_units_2h_1f)) {
+  # Build and train the model
+  model_result <- build_deeper_model(trn_data_matrix, trn_target, val_data_matrix, val_target,
+                                      num_units = c(30, num_units_2h_1f[i]), activation_type = c("relu", "relu"),
+                                      num_epochs = 50, batch_size = 128)
+  
+  # Get the validation mean squared error from the last epoch
+  val_mse <- tail(model_result$history$metrics$val_mean_squared_error, 1)
+
+  # Store the validation score
+  val_scores_2h_1f[i] <- val_mse
+}
+
+
+# Plot the validation scores for tuning the second hidden layer
+plot(num_units_2h_1f, val_scores_2h_1f, type = "b", xlab = "Number of Hidden Units (2nd Layer)",
+     ylab = "Validation Mean Squared Error", main = "Tuning Second Hidden Layer")
+
+```
+
+Now let's consider the given vector `num_units` for tuning the number of hidden units, in the set (10,30,50). store it in `val_scores_2h_1f` (2 hidden, 1 fixed). 
+
+What is the number of hidden units in the second layer that gives the minimum loss? 
+```{r}
+# Find the num_units that provides the minimum validation error for the second hidden layer
+best_num_units_2h_1f <- num_units_2h_1f[which.min(val_scores_2h_1f)]
+print(paste("Best Number of Hidden Units in 2nd Layer (1 fixed):", best_num_units_2h_1f))
+```
+So it looks again that larger is better, but at the cost of more compute / complexity. 
+
+### Jointly training two layers
+Per-layer hyperparameter selection could be a simple way to not to have to explore too many combinations (think about the combinations, if we want to tune 4 layers with 5 different possibilities each, that would make $5^4=625$ independent model training instances). There are tricks or "rule of thumbs", which apply to specific model architectures. For MLPs, it is common to sue the same number of neuron across layers, or to double it at each layer. Since our dataset and compute resources are not that big, we gonna stick to the first strategy. 
+
+Build once more a function `build_deeper_mode_joint_layers()` instantiating a model with 2 hidden layers, but this time the number of `hidden_units` is common for both `dense_layers()` 
+
+```{r}
+# Inputs: Training data, Training target, number of hidden units, activation type, number of epochs, batch size and validation size  
+# Output: List of 2 objects --> trained model, and the training history 
+## We also return the training history in case we want to make plots of the training process for each of the folds  
+# Function to build and train a model with two hidden layers, tuning the number of units in the second layer
+k_clear_session
+build_deeper_model_joint_layers  <- function(X_trn, y_trn, X_val, y_val, num_units, activation_type, num_epochs, batch_size) {
+  # Define the model
+  model <- keras_model_sequential() %>%
+    layer_dense(units = num_units[1], input_shape = ncol(X_trn), activation = "relu") %>%
+    layer_dense(units = num_units[2], activation = "relu") %>%
+    layer_dense(units = 1, activation = "linear")
+
+  # Compile the model
+  model %>% compile(
+    optimizer = optimizer_adam(),
+    loss = "mean_squared_error",
+    metrics = list("mean_absolute_error", "mean_squared_error")
+  )
+  
+  summary(model)
+  # Set up TensorBoard callback
+  tensorboard_callback <- callback_tensorboard(log_dir = "logs/fit/")
+
+  # Fit the model
+  history <- model %>% fit(
+    x = X_trn,
+    y = y_trn,
+    epochs = num_epochs,
+    batch_size = batch_size,
+    validation_data = list(X_val, y_val),
+    callbacks = list(
+      callback_early_stopping(patience = 5),
+      tensorboard_callback
+    )
+  )
+
+  return(list("model" = model, "history" = history))
+}
+
+# Example usage for tuning the second hidden layer
+num_units_1h_1f <- c(30, 50, 100)
+num_units_2h_1f <- c(10, 30, 50)
+
+val_scores_2h <- numeric(length(num_units_2h_1f)**2)
+combinations_list <- list()
+k = 0
+
+# Loop over num_units_2h_1f and train the model
+for (i in seq_along(num_units_1h_1f)) {
+  for (j in seq_along(num_units_2h_1f)){
+    k = k + 1
+    # Build and train the model
+    print(c(num_units_1h_1f[i], num_units_2h_1f[j]))
+    model_result <- build_deeper_model_joint_layers(trn_data_matrix, trn_target, val_data_matrix, val_target,
+                                        num_units = c(num_units_1h_1f[i], num_units_2h_1f[j]), activation_type = c("relu", "relu"),
+                                        num_epochs = 50, batch_size = 128)
+    
+    # Get the validation mean squared error from the last epoch
+    val_mse <- tail(model_result$history$metrics$val_mean_squared_error, 1)
+  
+    # Store the validation score
+    val_scores_2h[k] <- val_mse
+    local_combi <- c(num_units_1h_1f[i], num_units_2h_1f[j])
+    combinations_list <- list(combinations_list,local_combi)
+  }
+}
+
+
+```  
+```{r}
+combinations_list
+```
+
+
+```{r}
+# Find the num_units that provides the minimum validation error for two hidden layers
+val_scores_2h
+```
+
+We now that larger models might be better, so let's use something large. If the compute is just too slow, reduce this number and stick to it. Real life also means that we do not have huge compute infrastructure at hand! Store the validation scores in `val_scores_2h`.
+- Yes, 100,50 gives the best results i.e. about 21.2 compared to others.
+
+```{r}
+# Plot the validation scores for tuning the second hidden layer
+plot(x= c(1,2,3,4,5,6,7,8,9), y = val_scores_2h, type = "b", xlab = "Number of  Units",
+     ylab = "Validation Mean Squared Error", main = "Tuning Both Layers")
+
+```
+
+We notice again that larger the model, the better we do. But if you traked the learning curves, you could see that the validation error started diverging while the training error kept decreasing. Plot the history of the last model we trained, with the largest number of neurons (it should be already in memory), use `plot(trained_model$history)`.
+
+
+We can maybe guess that at this point, the model could start overfitting. In facts, if we had to train for more than 30 epochs, we would. 
+
+### more than 2 hidden units. 
+
+Feel free to experiment with 3 to 5 layers, and see what happens. What can you extrapolate from this behavior? 
+```{r}
+k_clear_session
+build_even_deeper_model  <- function(X_trn, y_trn, X_val, y_val, num_epochs, batch_size) {
+  # Define the model
+  model <- keras_model_sequential() %>%
+    layer_dense(units = 100, input_shape = ncol(X_trn), activation = "relu") %>%
+    layer_dense(units = 50, activation = "relu") %>%
+    layer_dense(units = 30, activation = "relu") %>%
+    layer_dense(units = 15, activation = "relu") %>%
+    layer_dense(units = 1, activation = "linear")
+
+  # Compile the model
+  model %>% compile(
+    optimizer = optimizer_adam(),
+    loss = "mean_squared_error",
+    metrics = list("mean_absolute_error", "mean_squared_error")
+  )
+  
+  summary(model)
+  # Set up TensorBoard callback
+  tensorboard_callback <- callback_tensorboard(log_dir = "logs/fit/")
+
+  # Fit the model
+  history <- model %>% fit(
+    x = X_trn,
+    y = y_trn,
+    epochs = num_epochs,
+    batch_size = batch_size,
+    validation_data = list(X_val, y_val),
+    callbacks = list(
+      callback_early_stopping(patience = 5),
+      tensorboard_callback
+    )
+  )
+
+  return(list("model" = model, "history" = history))
+}
+
+
+print(c(num_units_1h_1f[i], num_units_2h_1f[j]))
+model_result_4h <- build_even_deeper_model(trn_data_matrix, trn_target, val_data_matrix, val_target,
+                                                num_epochs = 50, batch_size = 128)
+    
+# Get the validation mean squared error from the last epoch
+val_mse_4h <- tail(model_result_4h$history$metrics$val_mean_squared_error, 1)
+  
+print(val_mse_4h)
+```
+
+Pull together and plot all the validation scores to guess which model was best!
+
+```{r}
+val_scores_1h
+val_scores_2h_1f
+val_scores_2h
+val_mse_4h
+```
+
+What are  your impressions on selecting models and architectures, given that little experience? 
+
+```{r}
+# Denser models are better than simple models usually (more hidden layers are better)
+# More parameters are usually better as long as they wont overfit or remember the inputs and not generalizing.
+# Model selection comes more from experience and can be thought of as art rather than a science entirely.
+# 
+```
+
+## Conclusions
+
+In this application we explored how we could go on to select and optimize some hyperparameters of an MLP model. We defined one independent held out validation set, in addition to a test set that we would only use to assess a final model after (usually) merging training and validation set, to provide more data for the optimization. 
+
+We have seen that in this example adding complexity to the model (layers, neurons) often means obtaining a more accurate validation set. Can someone guess why this is the case, for this dataset? What could we have done differently? 
+
+## Further explorations. 
+
+There remain so many different things to explore! For anyone interested in MLPs and neural networks, here is a list of further experiments to explore more aspects, which in principle require little modifications from the code above! I will be also happy to discuss some of these in person if there is interest. 
+- Tune learning rates and different nonlinearities
+- Explore different architectures
+- Split data in time and not at random
+- Optimize other metrics 
+- Develop a classification problem, eg by thresholding the `GPP` values into different classes, and use same architectures but using cross-entropy loss. 
+- Push one architecture to the extreme: it is a common thing (usually, first thing to do!) to have some model, without regularization, to perfectly fit the training set. This is a bit worrysome in some settings, but the smallest architecture perfectly fitting the data could be a starting point from which branch out model search. 
+
+

@@ -1,0 +1,728 @@
+---
+title: "9: Exercise on classification"
+author: "Rohit Koonireddy"
+date: "2023-11-19"
+output: html_document
+html_document: default
+---
+
+
+# An exercise ~guided tour~ on linear classificaiton using logistic regression 
+
+## Intro
+
+In this exercise session, we gonna explore together *classification*, as for the tutorial, as close as possible to what we have seen in the lecture. Supervised classification works exactly the same as for regression: our model is the solution of a minimization problem, that has the optimum when classes are optimally separated on the training set. While for a regression problem we were interested at _approximating_ a function, here we want our function to be _separating_ discrete object classes, or providing us with a probability which tells us how likely is a given data point to belong to one class. 
+
+## Data
+
+In this exercise, we gonna classify our beloved _Iris_ dataset, and no longer clustering it. We should not have problems with the duplicate entry in our datatable, as we had when checking whether the Euclidean distance is valid (which should have been, otherwise!). We will prevent numerical instabilities explicitly. 
+
+### Objectives
+
+The aim of these practicals is to cover one of the most important classification method: logistic regression and its multiclass extension. As for the tutorial, we gonna see two different implementation of the classifier, a binary logitic regression implementation using `glm` a custom multiclass implementation using `Keras` on `TensorFlow`. As for regression, the step between a simple linear model to more complex deep learning classifier is really short! 
+
+Here, we want to: 
+- Overview classification using logistic regression models
+- Hands on `TensorFlow` through the `Keras` API and gain an idea how NNs are built
+- Explore the solutions in terms of input space decision function
+- Quickly compute some assessment and check and compare results
+
+## Exercise
+
+### Logistic Regression
+
+So far we have studied gradient descent in the context of linear regression. Such a linear model is given by the following formula: $y = w_1x_1 +...+ w_nx_n + b = \mathbf{w}\mathbf{x}+ b$ in vector notation. 
+
+where $y$  is measured on a continuous scale, $x_i$ are the $ i \in 1,\ldots,d$ features for a $d$-dimensional dataset and $w_i$ are the weights we are trying to estimate.
+
+Recall from lecture that by applying a sigmoid function to the right-hand side of the above equation, you transition from a linear regression to a logistic regression. Unlike for linear regressions, the outputs or predictions from a logistic regression are not continuous. Logistic regressions can be used to model targets that lie in the range [0,1], such as probabilities. It is most commonly used to model binary targets (e.g., this image does contain a cat (presence) vs. this image does not contain a cat (absence)). Multi-class extensions of the standard logistic regression combine multiple binary classifiers. We gonna first check a binary problem, and then extend to multiclass using `TensorFlow`. 
+
+Let's consider a hypothetical binary classification example. That is, assume $y$ either takes the value $0$ (no cat) or $1$ (cat). We are interested in modeling the relation between $P(y=1|\mathbf{x})$ and $\mathbf{x} = [x_1,x_2,...,x_n]$. The aforementioned relation can be defined as $P(Y=1|x) = \sigma(\mathbf{w}\mathbf{x}+ b)$, where $\sigma(t) = \frac{1}{1+e^{-t}$, where $t$ is a scalar. Figure \@ref(fig:log_fun) shows what such a logistic function looks like.
+
+```{r log_fun, echo = F, fig.cap="Visualization of a logistic function."}
+knitr::include_graphics("./figures/log_fun.jpg")
+```
+
+In a nutshell, logistic regression is just a linear model, which is trained to best split two classes. On top of this, there is an activation function, which in this case is just a re-normalisation, which converts the range to a probability. This activation is called `sigmoid` for binary problems, and is seen as a link function in a generalised linear model, which uses a `binomial` distribution. Any values of $t$ below 0 will result in a probability closer to 0 (e.g no cat), while any values of $t$ above 0 will result in a probability closer to 1 (e.g. presence of a cat). You can very easily show that: 
+
+```{r}
+# create a vector ranging from , sort it and pass it through the sigmoid function and plot it to see how it looks like! 
+
+# create a vector ranging from -10 to 10
+x <- seq(-10, 10, length.out = 100)
+
+# sort the vector
+x_sorted <- sort(x)
+
+# define the sigmoid function
+sigmoid <- function(x) {
+  1 / (1 + exp(-x))
+}
+
+# apply the sigmoid function to the sorted vector
+y <- sigmoid(x_sorted)
+
+# plot the result
+plot(x_sorted, y, type = "l", col = "blue", lwd = 2, main = "Sigmoid Function", xlab = "x", ylab = "sigmoid(x)")
+
+```
+
+This is the sigmoid function, which transforms an unbounded score on the real line, here, x-axis, into a value in $[0,1]$ which can be interepreted as a probability.
+
+The parameters of logistic regression can be estimated using gradient descent, just as we did in the tutorial for linear regression, albeit with a different loss function. More on that below. 
+
+In the binary case, and one the model parameters have been estimated, the probability that an example belongs to the positive class os $\hat{p} = \sigma(\mathbf{w}\mathbf{x}+ b)$, and a final (discrete) decision -- if needed -- can very simply be done by classifying as positives all the point that have been assigned a probability greater than 0.5. Note that this threshold can still be tuned (remember ROC curves and threshold selection). 
+
+As the sigmoid is a _monotonic_ function, a threshold of 0.5 for binarisation of the prediction scores exactly corresponds to 0 crossing: 
+- $\hat{p}\geq 0.5$ when $\mathbf{w}\mathbf{x}+ b \geq 0$
+- $\hat{p}< 0.5$ when $\mathbf{w}\mathbf{x} + b < 0$
+
+The equation $\mathbf{w}\mathbf{x}+ b = 0$ is referred to as the _decision boundary_ (the vertical black line in the figure above where t=0 on the x-axis and crossing the dotted of 0.5 on the y-axis).
+
+### Training and Loss Function
+
+The objective of training is to find a set of weights $w_1...w_n$ and a bias $b$, such that the model estimates high probabilities for positive instances $(y = 1)$ and low probabilities for negative instances $(y=0)$. How well the model performs this task can be quantified using the following loss function, shown here for a single training example $\mathbf{x}$:
+
+$$   
+\mathrm{Loss}(\boldsymbol{(w,b)}) = 
+     \begin{cases}
+      -\log{\hat{p}}, &\quad \mathrm{if} \  y \ = \ 1 \\ 
+      -\log({1-\hat{p}}), &\quad \mathrm{if} \ y \ = \ 0
+     \end{cases}
+$$
+
+This function makes sense because $-\log(\hat{p})$ grows large when $\hat{p}$ approaches 0, so the loss will be large if the model estimates a probability close to 0 for a positive instance. Similarly, $-\log(1-\hat{p})$ grows large when $\hat{p}$ approaches 1, so the loss will be large if the model estimates a probability close to 1 for a negative instance.
+
+The loss function can be applied to the entire training set by taking the average over all training examples. It can be written in a single expression:
+$$
+\mathrm{Loss}(\boldsymbol{(w,b)}) = -\frac{1}{n}\sum_{i=1}^{n} \left[ y_i\log(\hat{p}_i)+(1-y_i)\log(1-\hat{p}_i)\right]
+$$
+
+This loss function is called _binary cross-entropy_, as you hopefully remember from the video lectures. Unfortunately, there is no a closed form solution for this loss function, so we have to use heuristics such as the gradient descent algorithm to minimize it.
+
+*IMPORTANT NOTE: READ CAREFULLY!* 
+Do not skip this part or you'll run into issues later on!
+In a moment, after you've read the following instructions carefully, you should:
+
+- run the code chunk immediately below this text (`set_random_seed(0)`). 
+- look down in the *Console* it asks if you want to install some packages: ("Would you like to install Miniconda? [Y/n]:"). 
+- write _n_ and press enter. You should see the following code in the console: `Would you like to install Miniconda? [Y/n]: n`. 
+- if you were too eager and already pressed _Y_ (yes) and enter, don't panic! Just close your environment, re-open it and make sure that next time you go with _n_ (no).
+
+
+
+```{r message=FALSE, warning=FALSE}
+library(reticulate)
+#use_condaenv('r-reticulate')
+library(tensorflow)
+library(rjson)
+library(tidyverse)
+library(patchwork)
+library(keras)
+library(tensorflow)
+library(IRdisplay)
+
+# plot size 
+options(repr.plot.width = 10, repr.plot.height = 7)
+```
+
+### Hands on! 
+
+Load and prepare the Iris data as you know! (see the clustering exercise). In addition: 
+- we are going to merge class 1 and 2 to transform that in a binary problem. This allows us to have better control over things. More on the 3 class problem later! 
+- we are only using the _first two features_ of Iris, ie, `Sepal.Length` and `Sepal.Width`. 
+- to make things a bit better, we add a small jitter on the data, as already written. This makes sure that data point are not exactly the same. 
+```{r}
+# Load Iris, split features from labels, change labels
+library("datasets")
+library("tidyr")
+data(iris)
+
+# Merge class 1 and 2 to transform it into a binary problem
+iris_binary <- iris
+iris_binary$Species <- ifelse(iris_binary$Species %in% c("setosa", "versicolor"), "binary_class", "virginica")
+
+# Use only the first two features (Sepal.Length and Sepal.Width)
+X <- iris_binary[, c("Sepal.Length", "Sepal.Width")]
+data_types <- sapply(X, class)
+# Print the data types
+print(data_types)
+
+# Apply jitter to the specified column
+for (col in colnames(X)){
+  X[[col]] <- jitter(X[[col]], amount = 0.05, factor = 0.05)
+
+}
+
+# Create a dataframe X_df
+X_df <- as.data.frame(X)
+X_df$Species <- iris_binary$Species
+X <- iris_binary[, c("Sepal.Length", "Sepal.Width")]
+
+# Show summary and check that statistics are not too different after jittering
+summary(X)
+summary(X_df)
+```
+Yes, not too different.
+
+
+Now plot the data. We see that in our binary problem classes are not perfectly separable in the 2D plane `Sepal.Length` and `Sepal.Width` that we created, for academic purposes of course. 
+
+```{r}
+str(X_df)
+
+library(ggplot2)
+
+#Plot the data
+ggplot(X_df, aes(x = Sepal.Length, y = Sepal.Width, color = Species)) +
+  geom_point(size = 3, alpha = 0.7) +
+  labs(title = "Scatter Plot of Sepal.Length and Sepal.Width",
+       x = "Sepal.Length", y = "Sepal.Width", color = "Species") +
+  theme_minimal()
+```
+
+Prepare the data for training and testing, by shuffling and using an 60/40  training to test split. 
+
+```{r}
+set.seed(556)  # Set a seed for reproducibility
+
+# Sample indices for training (60%) and testing (40%)
+ind_tr <- sample(seq_len(nrow(X_df)), size = 0.6 * nrow(X_df))
+ind_ts <- setdiff(seq_len(nrow(X_df)), ind_tr)
+
+# Verify that training and testing indices have no element in common
+print(any(ind_tr %in% ind_ts))  # Should print FALSE
+
+# Prepare learning dataframes df_tr and df_ts containing features and labels
+df_tr <- X_df[ind_tr, ]
+df_ts <- X_df[ind_ts, ]
+df_tr$y <- ifelse(df_tr$Species == "binary_class", 1, 0)
+df_ts$y <- ifelse(df_ts$Species == "binary_class", 1, 0)
+
+```
+
+We can now plot the different learning sets, and color them by class labels. In the next plot (somewhat ugly, but can be takes as example) we color in red and blue the two classes, and circles mean that a point belongs to the test set, while cross to the training.
+
+```{r}
+ggplot() + 
+  geom_point(df_tr, mapping=aes(x=Sepal.Length, y=Sepal.Width, col = ifelse(y == 1, "red", "darkblue")), shape=4) +
+  geom_point(df_ts, mapping=aes(x=Sepal.Length, y=Sepal.Width, col = ifelse(y == 1, "red", "darkblue")), shape=1) + 
+  theme_bw() + labs(title = bquote('Learning sets'))
+
+```
+
+```{r}
+# count labels per learning set 
+label_counts_tr <- table(df_tr$y)
+label_counts_ts <- table(df_ts$y)
+
+# Print the counts
+print("Training Set Label Counts:")
+print(label_counts_tr)
+
+print("Testing Set Label Counts:")
+print(label_counts_ts)
+
+```
+
+A more appropriate way to split the data would be to use the `r-sample` package and select stratified samples according to the labels. Balancing data classes is crucial for extremely imbalanced problems, but in general, we want training and test distributions to be as similar as possible. Class proportions are hence preserved. 
+
+Use the `glm` function to fit a logistic regression model to the training data. For a logistic regression model the appropriate `family = binomial`. We now train a logistic regression using `glm` on the training set, and predict it on both training and test sets. 
+
+*Note*: we cannot model 3 classes with one logistic regression, but a common strategy would be to use a "one-versus-all" model, where we train 3 binary models separating in turns class 1 from the rest, class 2 from the rest and class 3 from the rest, where "the rest" are all the other classes merged into one. We then aggregate probabilities and assign a point to the highest one. 
+
+I use caret package to do stratified sampling
+```{r warning=FALSE}
+require(caret)
+set.seed(556) 
+
+# Create a stratified sample index
+stratified_index <- createDataPartition(X_df$Species, p = 0.6, list = FALSE)
+
+# Create training and testing sets based on the index
+df_tr <- X_df[stratified_index, ]
+df_ts <- X_df[-stratified_index, ]
+df_tr$y <- ifelse(df_tr$Species == "binary_class", 1, 0)
+df_ts$y <- ifelse(df_ts$Species == "binary_class", 1, 0)
+
+print(table(df_tr$y))
+print(table(df_ts$y))
+
+# add glm here and be sure that labels are 0 or 1, and not 1 and 2
+lg_fit <- glm(y ~ Sepal.Length + Sepal.Width - 1, data = df_tr, family = binomial)
+
+summary(lg_fit)
+
+```
+
+we can read that the decision function should be (close to) $f(\mathbf{x}) = 2.6189x_1 -0.3074x_2 - 1.4411$
+
+This means examples with $f(\mathbf{x}) \geq 0$ are predicted to have a label of `1` (i.e., they belong to the 'positive class'), whereas examples with $f(\mathbf{x}) < 0$ are predicted to have a label of `0` (i.e., they belong to the 'negative class'). 
+
+We can now predict the model on both training and test sets. We can use the argument `type="response"` to the function `predict` to obtain the output of the sigmoid, ie, the probabilities. 
+
+``` {r}
+predictions_tr <- predict(lg_fit, newdata = df_tr, type = "response")
+predictions_ts <- predict(lg_fit, newdata = df_ts, type = "response")
+```
+
+
+We can leave that aside for a second and look at the decision surface. Let's plot the learned sigmoid function in 2D!
+```{r}
+# Create a grid for scatter plot
+#create a grid of values ranging from -3 to 3, for each input dimension for IRIS 
+npoints <- 100
+grid_values <- seq(-3, 3, length.out = npoints)
+grid <- expand.grid(
+  Sepal.Length = grid_values,
+  Sepal.Width = grid_values
+)
+
+# Predict probabilities on the grid
+grid_predictions <- predict(lg_fit, newdata = grid, type = "response")
+
+# Reshape the predictions for scatter plotting
+z_grid <- matrix(grid_predictions, nrow = npoints, ncol = npoints)
+
+# Plot the scatter plot
+plot(
+  x = grid$Sepal.Length,
+  y = grid$Sepal.Width,
+  col = ifelse(z_grid >= 0.5, "blue", "red"),  # Color points based on predicted probabilities
+  pch = 16,
+  xlab = "Sepal.Length",
+  ylab = "Sepal.Width",
+  main = "Logistic Regression Decision Surface"
+)
+
+# Add points for the training and testing sets
+points(
+  x = c(df_tr$Sepal.Length, df_ts$Sepal.Length),
+  y = c(df_tr$Sepal.Width, df_ts$Sepal.Width),
+  col = c(ifelse(predictions_tr >= 0.5, "green", "white"), ifelse(predictions_ts >= 0.5, "green", "white")),
+  pch = 16
+)
+
+```
+
+```{r}
+#create a grid of values ranging from -3 to 3, for each input dimension for IRIS 
+npoints = 100
+d1 = kronecker(matrix(1,1,npoints),c(1:npoints))
+grid = cbind(matrix(t(d1), nrow = npoints^2, byrow = TRUE), matrix(d1, nrow = npoints^2, byrow = TRUE))
+grid = (grid / npoints) * 5 -2
+```
+
+```{r}
+df_grid = data.frame(Sepal.Length = grid[, 1], Sepal.Width = grid[, 2])
+
+# Predict the probability for the grid defined above
+pred = predict(lg_fit, newdata = df_grid, type = "response")
+
+# Store it in a df_pred data.frame
+df_pred = data.frame(x = df_grid$Sepal.Length, y = df_grid$Sepal.Width, c = pred)
+
+# Create a data frame for predicted labels
+df_pred_labels = data.frame(x = df_grid$Sepal.Length, y = df_grid$Sepal.Width, label = ifelse(pred >= 0.5, 1, 0))
+
+library(ggplot2)
+
+# Plot probability surface versus real labels
+ggplot() + 
+  geom_tile(data = df_pred, aes(x = x, y = y, fill = c)) + 
+  scale_fill_gradient2(low = "blue", high = "red", midpoint = 0.5) +
+  geom_point(df_tr, mapping = aes(x = Sepal.Length, y = Sepal.Width, color = as.factor(y))) + 
+  geom_point(df_ts, mapping = aes(x = Sepal.Length, y = Sepal.Width, color = as.factor(df_ts$y), shape = factor(df_ts$y))) + 
+  theme_bw() +
+  labs(title = bquote('Plot probability surface versus real labels'))
+
+# Plot probability surface versus predicted labels
+ggplot() + 
+  geom_tile(data = df_pred_labels, aes(x = x, y = y, fill = as.factor(label))) + 
+  scale_fill_manual(values = c("blue", "red")) +
+  geom_point(df_tr, mapping = aes(x = Sepal.Length, y = Sepal.Width, color = as.factor(y))) + 
+  geom_point(df_ts, mapping = aes(x = Sepal.Length, y = Sepal.Width, color = as.factor(df_ts$y), shape = factor(df_ts$y))) + 
+  theme_bw() +
+  labs(title = bquote('Plot probability surface versus predicted labels'))
+
+```
+
+It seems the trained model does a good job at predicting which examples should be associated with which label, in general. Some examples are clearly misclassified, and a linear model in 2D, I am afraid, cannot really do more than that... 
+
+Let's take the predictions from our trained logistic regression, and compute some accuracy scores as seen in the lectures: overall accuracy, precision, recall, and F1.  
+
+```{r}
+# Function to compute confusion matrix
+compute_confusion_matrix <- function(true_labels, predicted_labels) {
+  confusion_matrix <- table(true_labels, predicted_labels)
+  return(confusion_matrix)
+}
+
+# Function to compute accuracy
+compute_accuracy <- function(confusion_matrix) {
+  accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+  return(accuracy)
+}
+
+# Function to compute precision
+compute_precision <- function(confusion_matrix, class_label) {
+  precision <- confusion_matrix[class_label, class_label] / sum(confusion_matrix[, class_label])
+  return(precision)
+}
+
+# Function to compute recall
+compute_recall <- function(confusion_matrix, class_label) {
+  recall <- confusion_matrix[class_label, class_label] / sum(confusion_matrix[class_label, ])
+  return(recall)
+}
+
+# Function to compute F1 score
+compute_f1_score <- function(precision, recall) {
+  f1_score <- 2 * (precision * recall) / (precision + recall)
+  return(f1_score)
+}
+
+# Test set metrics
+confusion_matrix_test <- compute_confusion_matrix(df_ts$y, ifelse(predictions_ts >= 0.5, 1, 0))
+accuracy_test <- compute_accuracy(confusion_matrix_test)
+precision_test <- compute_precision(confusion_matrix_test, 1)  # Assuming class 1 is the positive class
+recall_test <- compute_recall(confusion_matrix_test, 1)
+f1_score_test <- compute_f1_score(precision_test, recall_test)
+
+
+# Function to plot confusion matrix as a heatmap
+plot_confusion_matrix <- function(confusion_matrix, title) {
+  df_confusion <- as.data.frame(confusion_matrix)
+  ggplot(df_confusion, aes(x = true_labels, y = predicted_labels, fill = Freq)) +
+    geom_tile(color = "white") +
+    theme_minimal() +
+    labs(title = title,
+         x = "Predicted",
+         y = "Actual") +
+    scale_fill_gradient(low = "grey", high = "blue") +
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+}
+
+
+# Plot confusion matrix for the test set
+plot_confusion_matrix(confusion_matrix_test, "Confusion Matrix (Test Set)")
+cat("Test Set Metrics:\n")
+cat("Accuracy:", accuracy_test, "\n")
+cat("Precision:", precision_test, "\n")
+cat("Recall:", recall_test, "\n")
+cat("F1 Score:", f1_score_test, "\n\n")
+
+# Training set metrics
+confusion_matrix_train <- compute_confusion_matrix(df_tr$y, ifelse(predictions_tr >= 0.5, 1, 0))
+accuracy_train <- compute_accuracy(confusion_matrix_train)
+precision_train <- compute_precision(confusion_matrix_train, 1)  # Assuming class 1 is the positive class
+recall_train <- compute_recall(confusion_matrix_train, 1)
+f1_score_train <- compute_f1_score(precision_train, recall_train)
+
+
+# Plot confusion matrix for the training set
+plot_confusion_matrix(confusion_matrix_train, "Confusion Matrix (Training Set)")
+cat("Training Set Metrics:\n")
+cat("Accuracy:", accuracy_train, "\n")
+cat("Precision:", precision_train, "\n")
+cat("Recall:", recall_train, "\n")
+cat("F1 Score:", f1_score_train, "\n")
+```
+We've got good scores, isn'it? or not? what can we say by comparing them? 
+
+
+We see that the training set is strongly biased against grouped lables rather than the other one. It is evident that the glm is more biased towards more data but we can also somewhat better results on test set which could be attributed to lesser data.
+
+
+### Using Keras! 
+
+We now are going to translate the regression model of the tutorial into a multi-class classification one! yay! multiclass logistic regression, aka, multinomial logistic regression!  
+
+Let's re-read the Iris dataset, just to be on the save side, but without changing the size of X or the number of classes -- we gonna work in it like it is. We still add some jitter, as before, to avoid collinear points. 
+
+```{r}
+set.seed(0)
+# Load Iris, scale, and jitter
+data(iris)
+
+# Scale data
+X <- scale(iris[, 1:4])
+
+# Add some small jitter
+X_df <- as.data.frame(X + matrix(rnorm(length(X), sd = 0.05), ncol = 4))
+
+# Add species column
+X_df$Species <- iris$Species
+```
+
+Let's split data again in 60-40, and create train and test dataframes `df_tr` and `df_ts`. 
+
+```{r}
+# We can set a seed for reproducible results.
+set.seed(556)
+
+# Create a stratified sample index
+stratified_index <- createDataPartition(X_df$Species, p = 0.6, list = FALSE)
+
+# Create training and testing sets based on the index
+df_tr <- X_df[stratified_index, ]
+df_ts <- X_df[-stratified_index, ]
+```
+
+
+The multiclass cross entropy deals with a multiclass problem directly, but we need to resahpe the labels into a one-hot-encoded vector. We need to create an array of shape N x C, where C is the number of classes. Each column corresponds to one class, and each entry is either a 0 or a 1, which indicates what class is active and which class is not. 
+
+`to_cagegorical(class_vector, num_classes=3)` does that for us, but be sure to pass a vector where the first class is 0 and the last 2. Not sure why we are now 0-indexing.
+
+```{r}
+require(keras)
+
+#create onehot for the labels
+species <- levels(X_df$Species)
+y_integer <- as.integer(X_df$Species)-1
+y_one_hot <- to_categorical(y_integer)
+
+y_train_int <- as.integer(df_tr$Species)-1
+y_train <- to_categorical(y_train_int)
+
+y_test_int <- as.integer(df_ts$Species)-1
+y_test <- to_categorical(y_test_int)
+
+#function to decode species
+decode_species <- function(input_species_onehot) {
+  return (species[apply(input_species_onehot, 1, function(row) which.max(row))])
+}
+
+```
+
+Let's now define the Keras model, we do not need to first define a function, we can just script the model and the layer concatenation. You are free to test different learning rates, and plot different aspects. 
+
+The multiclass cross-entropy is going to be used as loss, which is named `categorical_crossentropy`. As for the regression, we are going to use a `layer_dense(units = N_class, input_shape = D, activation = "softmax")`. Note that N_class is the size of the output of that layer, and the input size is the dimensionality of the data. We are going to use a `softmax` activation, which generalizes the sigmoid. 
+
+```{r warning=FALSE}
+# HINT: Use right activation and loss functions for logistic regression
+save_path_logs <- './'
+
+build_and_train_model <- function(x_train, y_train, learning_rate, num_epochs, batch_size, save_path) {
+  
+  x_train <- as.matrix.data.frame(x_train)
+  y_train <- as.matrix.data.frame(y_train)
+  # Feed-forward (non-recursive) neural nets (MLPs, CNNs, AutoEncoders, etc) and standard models (linear regression, classification) are `sequential` models, as operations are executed along a path with no loops (as opposed to recurrent neural networks for instance) 
+  model <- keras_model_sequential()
+  
+  # Name the model 
+  model.name <- 'logistic_regression_'
+  
+  # Name the log file
+  path <- file.path(save_path, 'logs')
+  dir.create(path)
+  fname <- file.path(path, paste(model.name, 'lr_', toString(learning_rate), '.json', sep = ""))
+  
+  
+  model %>% layer_dense(units = 3, input_shape = 4, activation = 'softmax')  # Assuming 3 classes and 4 features
+  
+  # Print the model description
+  summary(model)
+  
+  # Specify the learning rate and learning algorithm for SGD. Here, we use the standard, that we have seen in the lecture online.
+  opt <- optimizer_sgd(learning_rate = learning_rate)
+  
+  model %>% compile(loss = 'categorical_crossentropy', optimizer = opt, metrics = c("accuracy"))
+  
+  if (fname %in% list.files(path, full.names = TRUE)) {
+    file.remove(fname)
+  }
+  json_log <- file(fname)
+  json_logging_callback <- callback_lambda(
+    on_epoch_end = function(epoch, logs) {
+      write(
+        toJSON(list(
+          epoch = epoch + 1,
+          loss = logs[['loss']],
+          accuracy = logs[['accuracy']],
+          f1_score = logs[['f1_m']],
+          W = get_weights(model)[[1]],
+          b = get_weights(model)[[2]]
+        )),
+        file = fname, append = TRUE
+      )
+    },
+    on_train_end = function(logs) {
+      close(json_log)
+    }
+  )
+  
+  # Fit the model y = wx + b 
+  history <- model %>% fit(x_train, y_train,
+                           epochs = num_epochs,
+                           batch_size = batch_size,
+                           callbacks = json_logging_callback
+  )
+  
+  # Extract W and b
+  W <- get_weights(model)[[1]]
+  b <- get_weights(model)[[2]]
+  
+  return(list(model = model, history = history, W = W, b = b))
+}
+
+```
+
+```{r}
+X_train <- df_tr[, !(names(df_tr) %in% c("Species"))]
+X_test <- df_ts[, !(names(df_ts) %in% c("Species"))]
+
+set_random_seed(333)
+
+#set parameters
+learning_rate <- 0.1
+num_epochs <- 60
+batch_size <- 64
+save_path <- save_path_logs
+
+
+# Build and train a model
+# Note that if a function gives us multiple outputs at once, we can save them at once in individual variables as such:
+c(model, history, w_tf, b_tf) %<-%  build_and_train_model(X_train, y_train, learning_rate, num_epochs, batch_size, save_path)
+
+
+cat('\nFinal solution: w =', w_tf, ' b = ', b_tf, "\n")
+```
+
+We can now get predictions, and get the probabilities. We then store the index of the class with higher probability in a vector, which makes our final prediction. 
+
+```{r}
+# Take probabilities p_ts and p_tr for test and training set, respectively
+p_ts <- predict(model, as.matrix.data.frame(X_test))
+p_tr <- predict(model, as.matrix.data.frame(X_train))
+
+# get predicted labels from maximal probability
+pred_ts <- max.col(p_ts)
+pred_tr <- max.col(p_tr)
+
+```
+
+We can pairplot the predicted classes now, and see how those are distributed across training and test.
+```{r message=FALSE, warning=FALSE}
+df_ts_pred <- cbind(X_test, predicted_class = pred_ts)
+df_tr_pred <- cbind(X_train, predicted_class = pred_tr)
+
+# Load the GGally library
+library(GGally)
+
+# Pairplot for test set
+ggpairs(df_ts_pred, aes(color = as.factor(predicted_class)))
+
+# Pairplot for training set
+ggpairs(df_tr_pred, aes(color = as.factor(predicted_class)))
+```
+
+We can finally run an accuracy assessment as we did before, and plot the confusion matrix using the snippet given here, where `t_ts` is the cross-tabulation between predictions and ground truth
+```{r}
+t_ts <- table(decode_species(y_test), decode_species(p_ts))
+t_tr <- table(decode_species(y_train), decode_species(p_tr))
+
+df_t_ts = data.frame(t_ts)
+fr_r_ts = t_ts / rowSums(t_ts)
+
+df_t_ts$Freq <- as.vector(t_ts)
+
+# Plot normalized confusion matrix
+ggplot(df_t_ts, aes(x = Var1, y = Var2, fill = Freq)) +
+  geom_tile() + 
+  geom_text(aes(label = sprintf("%.2f%%", 100 * fr_r_ts)), vjust = 1) +  # Display percentages
+  scale_fill_gradient(low = "white", high = "red") +
+  labs(x = "Reference", y = "Prediction") +
+  scale_x_discrete(labels = c("Class_1", "Class_2", "Class_3")) +
+  scale_y_discrete(labels = c("Class_1", "Class_2", "Class_3")) +
+  labs(title = bquote("Normalized Confusion Matrix on Test Set"))
+
+```
+        
+```{r}
+# run accuracy assessment 
+# compute some metrics for the training set 
+
+# Nice plot for training CM
+df_t_tr = data.frame(t_tr) # t_tr is the cross-tabulation of the training set
+fr_r_tr = t_tr / rowSums(t_tr)
+df_t_tr$Freq <- as.vector(t_tr)
+
+ggplot(df_t_tr, aes(x = Var1, y = Var2, fill = Freq)) +
+  geom_tile() + 
+  geom_text(aes(label = sprintf("%.2f%%", 100 * fr_r_tr)), vjust = 1) +  # Display percentages
+  scale_fill_gradient(low = "white", high = "red") +
+  labs(x = "Reference", y = "Prediction") +
+  scale_x_discrete(labels = c("Class_1", "Class_2", "Class_3")) +
+  scale_y_discrete(labels = c("Class_1", "Class_2", "Class_3")) +
+  labs(title = bquote("Normalized Confusion Matrix on Train Set"))
+
+```
+```{r}
+# run accuracy assessment 
+# Function to compute metrics
+compute_metrics <- function(y_true, y_pred) {
+  confusion_matrix <- table(y_true, y_pred)
+  
+  # Compute accuracy
+  accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+  
+  # Compute precision, recall, and F1 Score for each class
+  precision <- diag(confusion_matrix) / rowSums(confusion_matrix)
+  recall <- diag(confusion_matrix) / colSums(confusion_matrix)
+  f1_score <- 2 * precision * recall / (precision + recall)
+  
+  # Compute macro-average and micro-average F1 Score
+  macro_avg_f1 <- mean(f1_score, na.rm = TRUE)
+  micro_avg_f1 <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+  
+  metrics <- list(
+    Accuracy = accuracy,
+    Precision = precision,
+    F1_Score = f1_score,
+    Macro_Avg_F1 = macro_avg_f1,
+    Micro_Avg_F1 = micro_avg_f1
+  )
+  
+  return(metrics)
+}
+
+# Compute metrics for test set
+metrics_test <- compute_metrics(decode_species(y_test),decode_species(p_ts))
+
+# Compute metrics for training set
+metrics_train <- compute_metrics(decode_species(y_train),decode_species(p_tr))
+
+# Print the metrics
+print("Metrics for Test Set:")
+print(metrics_test)
+
+print("Metrics for Training Set:")
+print(metrics_train)
+
+```
+
+
+What can we say about this evaluation and these numbers? Can we compare that to the binary problem above? 
+
+- We see that our neural network based model performs well compared to the binary classification model we have before. This can be primarily attributed to parameters, linear assumption of model in binary classification makes it impossible for better classification. The non-linearity in neural networks nicely does the classification.
+
+How do the weights of our model look like right now? We can get those from our trained model, using `get_weights(model)`. This all makes sense, because our only weights for the multiclass-cross entropy appear in the linear equation, ie $P(Y=1|x) = \sigma(\mathbf{w}\mathbf{x}+ b)$, where $\mathbf{w} \in \mathbb{R}^{4,3}$ and $\mathbf{b} \in \mathbb{R}^{3}$. So f(x) returns a 3 dimensional vector for each datapoint, which is then passed through the sigmoid $\sigma(\cdot)$ to renormalise those values to probabilities.
+```{r}
+# get_weights from model
+weights <- get_weights(model)
+
+# Assuming w_tf and b_tf are the weights and biases for the first layer
+w_tf <- weights[[1]]
+b_tf <- weights[[2]]
+
+# Display weights and biases
+cat('\nModel Attributes: \nweights =', w_tf, ' \nbiases = ', b_tf, "\n")
+```
+
+
+
+
+
+
+

@@ -1,0 +1,122 @@
+---
+title: 'Exercise 01: Primers'
+author: "Rohit Koonireddy"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+This exercise will have you working on an Excel file. Your task will be to tidy the data and then read it into Renku's Rstudio.
+
+Download data from Groenigen et al., 2014, containing soil organic matter content data from a meta analysis of CO2 experiments (available on Moodle). Open the file in Excel and navigate to the tab 'Database S1'. You will find a short description in the top-left cell: "Database S1. Overview of CO2 enrichment studies reporting soil C contents that were used in our analysis.". The main issue with this dataset is that .xlsx files are not easily readable into R without an extra package. In addition, even after saving the tab 'Database S1' as a CSV file, the table you get is not **machine-readable** into a data frame that we can work with in R. The way the data is organised into cells does not follow the structure of a dataframe and is not tidy. Recall the **tidy data** rules from the 01_primers.Rmd tutorial.
+
+```{r message=FALSE, warning=FALSE}
+### packages that need to be installed
+#install.packages("foreign")
+#install.packages("readr")
+#install.packages("readxl")
+#install.packages("dplyr")
+#install.packages("Hmisc")
+#install.packages("fastDummies")
+#install.packages("tidyr")
+#install.packages("vtable")
+#install.packages("stargazer")
+#install.packages("wooldridge")
+#install.packages("gapminder")
+#install.packages("ggplot2")
+#install.packages("gganimate")
+#install.packages("gifski")
+#install.packages("av")
+#install.packages("sandwich")
+#install.packages("lmtest")
+#install.packages("fixest")
+#install.packages("broom")
+#install.packages("modelsummary")
+#install.packages("AER")
+#install.packages("car")
+#install.packages("openxlsx")
+
+library("foreign");
+library("readr");
+library("readxl");
+library("dplyr");
+library("Hmisc");
+library("fastDummies");
+library("tidyr");
+library("vtable");
+library("stargazer");
+library("wooldridge");
+library("gapminder");
+library("ggplot2");
+library("gganimate");
+library("gifski");
+library("av");
+library("sandwich");
+library("lmtest");
+library("fixest");
+library("broom");
+library("modelsummary");
+library("AER");
+library("car");
+library("openxlsx");
+```
+
+
+Your task is to:
+
+**1. Manually manipulate the .xlsx file to make it tidy.**
+
+**2. Save the data as a .csv file (comma-separated-values).**
+
+**3. Read the .csv file into RStudio.**
+
+```{r warning=FALSE}
+# enter your solution here
+setwd("Exercise 1") #chage it to directory wherever your cleaned file is located
+sampleData <- read.xlsx("groenigen14sci_cleaned.xlsx");
+write.csv(sampleData, file = "groenigen14sci_cleaned.csv", row.names = FALSE);
+sampleDataCsv <- read.csv("groenigen14sci_cleaned.csv");
+head(sampleDataCsv)
+```
+
+
+**4. Calculate the logarithmic response ratio as the logarithm of the ratio of soil C contents at elevated CO2 divided by soil C contents at ambient CO2, for each data point (experiment and sample date).**
+
+```{r}
+colnames(sampleDataCsv)
+```
+
+```{r}
+# enter your solution here
+sampleDataCsv$log_response_ratio <- 
+  log(sampleDataCsv$"increased.CO2..mean..g.C.m.2" / sampleDataCsv$"ambient.CO2..mean..g.C.m.2")
+head(sampleDataCsv)
+```
+
+
+**5. Visualise the distribution of the response ratio and save the plot as a .pdf file.**
+
+```{r message=FALSE}
+# enter your solution here
+response_ratio_plot <- ggplot(sampleDataCsv, aes(x = log_response_ratio)) +
+  geom_histogram(binwidth = 0.2, fill = "blue", color = "black") +
+  labs(title = "Distribution of Log Response Ratio",
+       x = "Log Response Ratio",
+       y = "Frequency")
+
+# Print the plot
+print(response_ratio_plot)
+
+# Save the plot as a .pdf file
+ggsave("response_ratio_distribution.pdf", plot = response_ratio_plot)
+```
+
+**6. Export the new data frame in csv file. ** 
+```{r}
+# enter your solution here
+print("saving final file")
+write.csv(sampleDataCsv, file = "final_data.csv", row.names = FALSE)
+```
+
+

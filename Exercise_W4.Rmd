@@ -1,0 +1,345 @@
+---
+title: "Week 4 Exercise: Reproducible and reusable research"
+author: "Rohit Koonireddy"
+date: "2023-10-15"
+output: html_document
+---
+
+```{r message=FALSE}
+require(lubridate)
+require(tidyverse)
+require(purrr)
+library(brms)
+library(rstan) 
+```
+
+In this exercise, we will continue working with the dataset from the tutorial to explore the time-dependent relationship between Rs and Rh as presented in the paper.
+
+Read the dataset in as a dataframe.
+
+```{r}
+df <- read.csv("data/rh-changes-master/reproducibility/srdb_filtered.csv")
+head(df)
+```
+
+## Data exploration
+
+Write a function that takes a vector of data and finds the data type (eg. string, integer, float...) and the number of NaNs. 
+
+* If the data are numeric, the mean and the standard deviation should also be found; if they data are not numeric, the function should output NaNs for mean and standard deviation. 
+
+* By default, the function should remove NaNs when finding mean and standard deviation, but it should be possible to provide an input to the function so that NaNs are not removed.
+
+* Test the function on columns 1, 4 and 5 of the dataset
+
+```{r}
+# Create the function
+data_summary_func = function(datavec) {
+  #print(class(datavec))
+  #print(paste0("Number of NaN values:", sum(is.na(datavec))))
+  NAs_count <- sum(is.na(datavec))
+  local_mean <- 0
+  local_std <- 0
+  # Check if the class is numeric and calculate the mean and standard deviation
+  if (class(datavec) == "numeric") {
+    datavec <- datavec[!is.na(datavec)]
+    local_mean <- mean(datavec)
+    local_std <- sd(datavec)
+    #print(paste0("The mean of this vector is:", local_mean))
+    #print(paste0("The standard deviation of this vector is:", local_std))
+  } else {
+    local_mean <- NaN
+    local_std <- NaN
+    #print(paste0("The mean of this vector is:", local_mean))
+    #print(paste0("The standard deviation of this vector is:", local_std)) 
+  }
+  return(data.frame(class(datavec),NAs_count,local_mean, local_std))
+}
+
+# Test the function on columns 1, 4, and 5
+data_summary_func(df[,1])
+data_summary_func(df[,4])
+data_summary_func(df[,5])
+```
+
+Use purrr or a baseR apply function to apply your function to each column of the input data frame. Save the results as a dataframe. 
+
+* Hint: If your function returns a dataframe, it might be easier to return a dataframe when applying it to the full dataset.
+
+```{r}
+# Apply the function to each column of the input data frame
+results_df <- map_df(df, data_summary_func)
+
+# Print the resulting data frame
+print(results_df)
+```
+
+## Plotting Rs and Rh
+
+In the tutorial, we plotted Rs against Rh and Rh/Rs. Recreate the plot, but colour each point by the year.
+
+* Use a colour scale and a colour bar so the progression through the years can easily be visualised
+
+* Use a log scale for Rs and Rh, like in Figure 1 of the paper (for Rh/Rs, you can choose if you rather log transform or not)
+
+* You can use ggplot or base R. This problem may be easier with ggplot (use google to see how) but we've not covered subplots in ggplot, so in this case you can do two separate plots.
+```{r warning=FALSE}
+# Load the ggplot2 library
+library(ggplot2)
+
+# Set up a multi-plot layout with proper spacing
+library(gridExtra)
+grid.arrange(
+  arrangeGrob(
+    # Create a ggplot object for Rh vs. Rs with color scale
+    ggplot(df, aes(x = log(Rs_annual), y = log(Rh_annual), color = Year)) +
+      geom_point(shape = "x") +
+      scale_color_gradientn(colors = rainbow(length(unique(df$Year))) ) +
+      labs(x = "log(Rs)", y = "log(Rh)") +
+      ggtitle("Rh vs. Rs in Log Scale"),
+    
+    # Create a ggplot object for Rh/Rs vs. Rs with color scale
+    ggplot(df, aes(x = log(Rs_annual), y = log(Rh_annual/Rs_annual), color = Year)) +
+      geom_point(shape = "x") +
+      scale_color_gradientn(colors = rainbow(length(unique(df$Year))) ) +
+      labs(x = "log(Rs)", y = "log(Rh/Rs)") +
+      ggtitle("Rh/Rs vs. Rs in log scale"),
+    ncol = 2
+  ),
+  
+  arrangeGrob(
+    # Create a ggplot object for Rh vs. Rs
+    ggplot(df, aes(x = Rs_annual, y = Rh_annual, color = Year)) +
+      geom_point(shape = "x") +
+      scale_color_gradientn(colors = rainbow(length(unique(df$Year))) ) +
+      labs(x = "Rs", y = "Rh") +
+      ggtitle("Rh vs. Rs"),
+    
+    # Create a ggplot object for Rh/Rs vs. Rs with color scale
+    ggplot(df, aes(x = Rs_annual, y = Rh_annual/Rs_annual, color = Year)) +
+      geom_point(shape = "x") +
+      scale_color_gradientn(colors = rainbow(length(unique(df$Year))) ) +
+      labs(x = "Rs", y = "Rh/Rs") +
+      ggtitle("Rh/Rs vs. Rs in log scale"),
+    ncol = 2
+  ),
+  nrow = 2
+)
+
+```
+
+Discretize the "Year" column of the dataset to create a new feature called "Year_Class" with values of 1, 2, 3 respectively for the three periods considered in the paper: 1990-1998, 1999-2006 and 2007-2014. 
+
+* Add some data checking to make sure all values of year were assigned a class. Do any measurements fall outside 1990-2014?
+Yes, some measurements fall outside the assigned class. The data starts from 1965 and ends in 2015.
+```{r}
+periods <- data.frame(
+  Start = c(1990, 1999, 2007),
+  End = c(1998, 2006, 2014),
+  Year_Class = c(1, 2, 3)
+)
+
+# Create the Year_Class column based on the specified periods
+df$Year_Class <- cut(df$Year, breaks = c(1989, periods$Start, 2015), labels = FALSE)
+
+# Check if any values fall outside the specified periods
+outside_periods <- df$Year[df$Year_Class == 0]
+
+print(any(is.na(df$Year_Class)))
+
+# Data checking
+if (any(is.na(df$Year_Class))) {
+  cat("Warning: Some values were not assigned a class.\n")
+}
+
+if (length(outside_periods) > 0) {
+  cat("Warning: Some measurements fall outside the specified periods:\n")
+  print(outside_periods)
+} else {
+  cat("All values of Year were assigned a class.\n")
+}
+```
+
+Recreate the figure again with each period coloured differently, similar to Figure 1 in the paper.
+
+* Use a log scale for Rs and Rh, like in Figure 1 of the paper (for Rh/Rs, you can choose if you rather log transform or not)
+
+```{r warning=FALSE}
+# Set up a multi-plot layout with proper spacing
+df <- df[!is.na(df$Year_Class), ]
+
+library(gridExtra)
+grid.arrange(
+  arrangeGrob(
+    # Create a ggplot object for Rh vs. Rs with color scale
+    ggplot(df, aes(x = log(Rs_annual), y = log(Rh_annual), color = Year_Class)) +
+      geom_point(shape = "x") +
+      scale_color_gradientn(colors = rainbow(length(unique(df$Year))) ) +
+      labs(x = "log(Rs)", y = "log(Rh)") +
+      ggtitle("Rh vs. Rs in Log Scale"),
+    
+    # Create a ggplot object for Rh/Rs vs. Rs with color scale
+    ggplot(df, aes(x = log(Rs_annual), y = log(Rh_annual/Rs_annual), color = Year_Class)) +
+      geom_point(shape = "x") +
+      scale_color_gradientn(colors = rainbow(length(unique(df$Year))) ) +
+      labs(x = "log(Rs)", y = "log(Rh/Rs)") +
+      ggtitle("Rh/Rs vs. Rs in log scale")
+  ),
+  ncol = 2
+)
+```
+
+## Relationship between Rs and Rh
+
+Create a wrapper function so that you are easily able to apply the brm() function to each of the three time periods to find the slope between Rs and Rh. 
+
+* Apply brm() with uninformative priors just like in the tutorial, but using Year_Class to select the correct data
+
+* Log-transform both Rh and Rs, as was done in the paper (we didn't do this in the tutorial)
+
+* Use default MCMC parameters
+
+* Have an optional input to your wrapper to choose whether to display the graphical summary (using plot() from brms); the default should be to show the summary
+
+* Have your wrapper function return a list with: The trained model, the model summary, the prior summary, and the posterior summary
+
+* Apply to each of the three periods (you don't need to use apply/purrr, there's only three periods and you can apply manually)
+
+```{r warning=FALSE, results='hide'}
+# Wrapper function to fit a Bayesian regression model
+fit_bayesian_model <- function(data, display_summary = TRUE) {
+  # Log-transform Rh and Rs
+  data$Rh_log <- log(data$Rh_annual)
+  data$Rs_log <- log(data$Rs_annual)
+  
+  # Fit a Bayesian regression model
+  model <- brm(Rh_log ~ Rs_log, data = data)
+  
+  # Display graphical summary if required
+  if (display_summary) {
+    plot(model)
+  }
+  
+  # Extract model, model summary, prior summary, and posterior summary
+  model_summary <- summary(model)
+  prior_summary <- as.data.frame(prior_summary(model))
+  posterior_summary <- as.data.frame(posterior_summary(model))
+  
+  # Create a list with the results
+  results <- list(
+    model = model,
+    model_summary = model_summary,
+    prior_summary = prior_summary,
+    posterior_summary = posterior_summary
+  )
+  
+  return(results)
+}
+
+# Split the data by Year_Class and apply the wrapper function
+results_list <- lapply(split(df, df$Year_Class), fit_bayesian_model)
+
+# Access the results for each period (1, 2, 3)
+period_1_results <- results_list[[1]]
+period_2_results <- results_list[[2]]
+period_3_results <- results_list[[3]]
+```
+
+## Results
+
+Create a plot or plots similar to Figure 1 in the paper, showing the data and the slopes for the 3 periods.
+
+* You don't need to use the same colours as in Figure 1, and you don't need to add the probability distributions as these can easily be shown using the brms plot function (unless you want to add them for an extra challenge!)
+
+* Show the number of data points in each period, like in the legend of Figure 1
+
+* Use log scale for both axis
+```{r warning=FALSE}
+# Load necessary libraries
+library(brms)
+library(ggplot2)
+
+# Wrapper function to fit a Bayesian regression model
+fit_bayesian_model <- function(data, display_summary = TRUE) {
+  # Log-transform Rh and Rs
+  data$Rh_log <- log(data$Rh_annual)
+  data$Rs_log <- log(data$Rs_annual)
+  
+  # Fit a Bayesian regression model
+  model <- brm(Rh_log ~ Rs_log, data = data)
+  
+  # Display graphical summary if required
+  if (display_summary) {
+    plot(model)
+  }
+  
+  # Extract model, model summary, prior summary, and posterior summary
+  model_summary <- summary(model)
+  prior_summary <- as.data.frame(prior_summary(model))
+  posterior_summary <- as.data.frame(posterior_summary(model))
+  
+  # Create a list with the results
+  results <- list(
+    model = model,
+    model_summary = model_summary,
+    prior_summary = prior_summary,
+    posterior_summary = posterior_summary
+  )
+  
+  return(results)
+}
+
+# Create a list of data frames for each period (1, 2, 3)
+data_list <- lapply(1:3, function(period) {
+  subset_data <- df[df$Year_Class == period, ]
+  return(subset_data)
+})
+
+# Fit Bayesian models and store results in a list
+results_list <- lapply(data_list, fit_bayesian_model)
+```
+
+```{r warning=FALSE}
+library(gridExtra)
+
+# Create a ggplot object for Rh vs. Rs with color scale
+plot1 <- ggplot(df, aes(x = log(Rs_annual), y = log(Rh_annual), color = Year_Class)) +
+  geom_point(shape = "x") +
+  scale_color_gradientn(colors = rainbow(length(unique(df$Year))) ) +
+  labs(x = "log(Rs)", y = "log(Rh)") +
+  ggtitle("Rh vs. Rs in Log Scale") +
+  coord_cartesian(xlim = range(log(df$Rs_annual), na.rm = TRUE), ylim = range(log(df$Rh_annual), na.rm = TRUE))
+
+# Add lines to plot1
+line_colors <- c("red", "green", "cyan")
+line_linetypes <- c("solid", "dashed", "dashed")
+
+for (i in 1:3) {
+  plot1 <- plot1 +
+     geom_line(data = df, aes(x = Rs_annual, y = Rs_annual * results_list[[1]][[4]][2, 1] + results_list[[1]][[4]][1, 1]), color = "red", linetype = "solid") +
+    geom_line(data = df, aes(x = Rs_annual, y = Rs_annual * results_list[[2]][[4]][2, 1] + results_list[[2]][[4]][1, 1]), color = "green", linetype = "dashed") +
+    geom_line(data = df, aes(x = Rs_annual, y = Rs_annual * results_list[[3]][[4]][2, 1] + results_list[[3]][[4]][1, 1]), color = "cyan", linetype = "dashed")
+
+}
+
+# Display plot1
+print(plot1)
+
+```
+
+Do the slopes you found so the same trend as in the paper? (Bear in mind, you will not see the same values as in the paper; the analysis in the paper was more complex, accounting for other effects also, and not limited to these three blocks.)
+
+* For classes 2 and 3 of the years, my plots look similar to that of the paper but class 1 does not. I am not sure about the reason but this could be a measurement error. 
+
+## Summary
+
+In this exercise you have learnt:
+
+* Creating functions with optional inputs and multiple outputs
+
+* Combining function outputs as dataframe and as lists
+
+* Implementing a Bayesian regression estimate multiple times using a wrapper function
+
+The analysis we applied here was really simple, using uninformative priors and not accounting for error in the data, but it gives you an idea of what Bayesian approaches involve and how you can begin to implement them. Maybe you will want to apply these methods to your own data in future!
+

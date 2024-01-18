@@ -1,0 +1,499 @@
+---
+title: "12: Exercises on Neural Networks applied to Species Distribution Models"
+author: "Rohit Koonireddy"
+output: html_document
+date: "2022-11-23"
+---
+
+# Intro 
+In this exercise we will build and use species distribution models (SMDs) based on Deep Learning to map the distribution of multiple bird species over Switzerland. You will build two different models to perform this task. The first approach uses the model shown in the tutorial, but after analyzing the results obtained for one species, you will have to apply it to all species from the dataset. The second approach you will implement is similar to the first one, but instead of predicting the presence/absence of one species, it should predict the presence/absence of all species (i.e., a species community) at once for each location.
+
+This exercise involves a lot of code, but fortunately, we already did most of the work for you in the tutorial. Therefore, do not hesitate to copy-paste the functions you think are appropriate. The main objective for you is to understand the main components of the code and to adapt them to solve the exercises. Some questions will be asked to verify that you are able to understand how the models work, that you are able to analyse the results and that you have a critical thinking about the approach. 
+
+
+## Preliminary library import
+```{r message=FALSE, warning=FALSE}
+rm(list=ls()) # clean up the R environment
+library(reticulate)
+#use_condaenv('r-reticulate')
+library(tensorflow)
+tf_version()
+library(raster)
+library(sp)
+library(keras)
+library(tidyverse)
+library(tidymodels)
+library(dplyr)
+
+# set the seeds for better reproducibility
+set_random_seed(123) 
+set.seed(123)
+```
+
+## Preparing the datasets
+
+You should be already familiar with the dataset that you will be using here from previous tutorials and exercises. The file ```data/bird_presence.csv``` contains the presence and absence data of bird species across Switzerland. Following the tutorial, the first step is to combine these data to environmental variables contained in the raster file ```data/bird_extent_stack.rds```.
+
+- Load the bird presence/absence data (```data/bird_presence.csv```) and the environmental raster data (```data/bird_extent_stack.rds```), merge the two datasets into one dataframe and remove the observations (rows) containing ```NA``` values.
+```{r}
+bird.occurrences <- data.frame(read.csv("data/bird_presence.csv"))
+species.names <- names(bird.occurrences[, !names(bird.occurrences) %in% c("x", "y", "KoordID")])
+env.var <- readRDS("data/bird_extent_stack.rds")
+env.var.bird <- raster::extract(env.var, bird.occurrences[c("x", "y")])
+env.var.names <- colnames(env.var.bird)
+bird.data <- cbind(bird.occurrences, env.var.bird)
+bird.data <- bird.data[c(species.names, env.var.names)]
+bird.data <- na.omit(bird.data) # remove locations (rows) containing Na values
+```
+
+```{r}
+plot_obs_occurrences <- function(species.name, dataset){
+  presence <- dataset[dataset[, species.name]==1, c("x", "y")]
+  absence <- dataset[dataset[, species.name]==0, c("x", "y")]
+  plot(presence, main=species.name, col='darkgreen', pch=16, cex=0.8, xlab='', ylab='',
+       xlim=c(min(dataset$x), max(dataset$x)),
+       ylim=c(min(dataset$y), max(dataset$y)))
+  points(absence, col='red', pch=16, cex=0.8)
+}
+
+species.names.selected <- "Milvus.migrans"
+plot_obs_occurrences(species.names.selected, bird.occurrences)
+```
+
+
+- Write a function that split the dataset into train and validation following a ```proportion``` parameter; and builds train and validation batch generators. The ```env.var.names``` parameter is a list that determine which species are returned by the generators.
+```{r}
+generators_builder <- function(dataset, env.var.names, species.names, 
+                               proportion=0.8, batch.size=32){
+  dataset <- dataset[, c(env.var.names, species.names)]
+  split <- initial_split(dataset, proportion)
+  train.dataset <- data.matrix(training(split))
+  validation.dataset <- data.matrix(testing(split))
+  
+  
+  data_generator <- function(dataset, x, y, batch.size){
+    rows <- 1:nrow(dataset)
+    function() {
+      if (length(rows) < batch.size) rows <<- 1:nrow(dataset) # triggered after one epoch, all indices are put back in the rows vector
+      selected.rows.i <- sample(1:length(rows), batch.size, replace=FALSE) # randomly draw row indices
+      selected.rows <- rows[selected.rows.i]
+      x.values <- array(0, dim=c(batch.size, length(x)))
+      x.values[1:batch.size, ] <- array(dataset[selected.rows, x]) # convert the dataframe to a tensorflow array 
+      y.values <- array(0, dim=c(batch.size, length(y)))
+      y.values[1:batch.size, ] <- array(dataset[selected.rows, y])
+      rows <<- rows[-selected.rows.i] # the superassignment operator (<<-) modify the corresponding variable in the first scope level going towards the global environment scope
+      
+      return(list(x.values, y.values))
+    }
+  }
+  
+  train.generator <- data_generator(
+    data=train.dataset,
+    x=env.var.names,
+    y=species.names,
+    batch.size=batch.size)
+
+  validation.generator <- data_generator(
+    data=validation.dataset,
+    x=env.var.names,
+    y=species.names,
+    batch.size=batch.size)
+  
+  # R does not accept returning more than one value, therefore we store the two
+  # values in a list. They can later be accessed with the "$" operator.
+  return(list("train"=train.generator, "validation"=validation.generator, 
+              "train.length"=nrow(train.dataset), 
+              "validation.length"=nrow(validation.dataset)))
+}
+```
+
+```{r}
+batch.generators <- generators_builder(bird.data, env.var.names, species.names.selected)
+batch.generators$train()
+```
+
+
+## Exercise 1: Single species distribution modelling with a multilayer perceptron (MLP)
+In the first exercise, we applied the model presented in the tutorial to another bird species. As explained in the tutorial, deep learning models usually require a lot of data to train; otherwise, they can end up in pitfalls that you will have to identify during these exercises. 
+
+- Use the neural network from the tutorial and train it with data of *Milvus.migrans*. Modify the network to include: a L2 norm (set by default at 0.01) over the 4 first layers and an early-stopping procedure set up with a patience parameter of 5. Then perform the prediction over all Switzerland and display the result mapping. The number of epoch should be set up to 20, the batch size to 32 and the learning rate to 0.1. 
+
+```{r}
+build_single_output_nn_l2 <- function(mod_append = "") {
+  # Name the model
+  model.name <- paste("nnet_", mod_append, sep="")
+  
+  model <- keras_model_sequential(name = model.name) %>%
+    layer_batch_normalization() %>%
+    layer_dense(units = 9, activation = "relu", kernel_regularizer = regularizer_l2(0.01)) %>%
+    layer_batch_normalization() %>%
+    layer_dense(units = 128, activation = "relu", kernel_regularizer = regularizer_l2(0.01)) %>%
+    layer_batch_normalization() %>%
+    layer_dense(units = 64, activation = "relu", kernel_regularizer = regularizer_l2(0.01)) %>%
+    layer_batch_normalization() %>%
+    layer_dense(units = 32, activation = "relu", kernel_regularizer = regularizer_l2(0.01)) %>%
+    layer_batch_normalization() %>%
+    layer_dense(units = 1, activation = "sigmoid", kernel_regularizer = regularizer_l2(0.01))
+  
+  return(model)
+}
+```
+
+```{r}
+# Function to compile and train with early stopping
+compile_and_train_early_stopping <- function(model, batch.generators, batch.size,
+                                             learning.rate, max.epochs, patience, verbose = T) {
+  history <- c()
+  model %>% compile(loss = "binary_crossentropy",
+                    optimizer = optimizer_adam(learning_rate = learning.rate),
+                    metrics = list("acc")) 
+  callbacks.nn <- list()
+  callbacks.nn <- append(callbacks.nn,
+                         callback_reduce_lr_on_plateau(monitor = "val_loss",
+                                                       patience = 3, factor = 0.1))
+  callbacks.nn <- append(callbacks.nn,
+                         callback_early_stopping(monitor = "val_loss",
+                                                 patience = patience, restore_best_weights = TRUE))
+  if (!dir.exists("./saved_models/")) dir.create("./saved_models/")
+  callbacks.nn <- append(callbacks.nn,
+                         callback_model_checkpoint(file.path("./saved_models/",
+                                                              paste(model$name, ".h5", sep = "")),
+                                                  monitor = "val_loss", save_best_only = T, mode = "min",
+                                                  save_freq = "epoch"))
+  history <- model %>% fit_generator(
+    generator = batch.generators$train,
+    steps_per_epoch = as.integer(batch.generators$train.length / batch.size),
+    epochs = max.epochs,
+    validation_data = batch.generators$validation,
+    validation_steps = as.integer(batch.generators$validation.length / batch.size),
+    callbacks = callbacks.nn,
+    verbose = verbose
+  )
+  return(history)
+}
+```
+
+```{r Run11}
+single_output_nn_l2 <- build_single_output_nn_l2()
+history_l2 <- compile_and_train_early_stopping(single_output_nn_l2, batch.generators, 32, 0.1, 20, patience = 5)
+plot(history_l2)
+```
+
+
+```{r Run21}
+single_output_nn_l2 <- build_single_output_nn_l2()
+history_l2 <- compile_and_train_early_stopping(single_output_nn_l2, batch.generators, 32, 0.1, 20, patience = 5)
+plot(history_l2)
+```
+
+
+```{r}
+build_single_output_nn <- function(mod_append=""){
+  
+  #Name the model
+  model.name <- paste("nnet_", mod_append, sep="")  
+  model <- keras_model_sequential(name=model.name) %>%
+    layer_batch_normalization() %>%
+    layer_dense(units=9, activation="relu") %>%
+    layer_batch_normalization() %>%
+    layer_dense(units=128, activation="relu") %>%
+    layer_batch_normalization() %>%
+    layer_dense(units=64, activation="relu") %>%
+    layer_batch_normalization() %>%
+    layer_dense(units=32, activation="relu") %>%
+    layer_batch_normalization() %>%
+    layer_dense(units=1, activation="sigmoid")
+  
+  return(model) 
+}
+
+
+compile_and_train <- function(model, batch.generators, batch.size, 
+                              learning.rate, max.epochs, verbose=T){
+  history <- c()
+  model %>% compile(loss="binary_crossentropy", 
+                  optimizer=optimizer_adam(learning_rate=learning.rate),
+                  metrics=list("acc")) # by default Keras uses a 0.5 threshold to compute the accuracy
+  callbacks.nn <- list()
+  callbacks.nn <- append(callbacks.nn, 
+                         callback_reduce_lr_on_plateau(monitor = "val_loss", 
+                                                       patience=3, factor=0.1))
+  if (!dir.exists("./saved_models/")) dir.create("./saved_models/")
+  callbacks.nn <- append(callbacks.nn,
+                         callback_model_checkpoint(file.path("./saved_models/",
+                         paste(model$name, ".h5", sep="")), 
+                         monitor="val_loss", save_best_only=T, mode="min", 
+                         save_freq="epoch"))
+  history <- model %>% fit_generator(
+    generator=batch.generators$train,
+    steps_per_epoch=as.integer(batch.generators$train.length/batch.size),
+    epochs=max.epochs,
+    validation_data=batch.generators$validation,
+    validation_steps=as.integer(batch.generators$validation.length/batch.size),
+    callbacks=callbacks.nn,
+    verbose=verbose)
+  return(history)
+}
+```
+
+
+```{r Run1}
+single_output_nn <- build_single_output_nn()
+history <- compile_and_train(single_output_nn, batch.generators, 32, 0.1, 20)
+plot(history)
+```
+
+```{r Run2}
+single_output_nn <- build_single_output_nn()
+history <- compile_and_train(single_output_nn, batch.generators, 32, 0.1, 20)
+plot(history)
+```
+
+**Question 1: Run the previous code chunk multiple times and take a look at the results. How can you explain that they keep changing after each training of the model?**
+
+**Solution:**
+The results may vary between runs due to the random initialization of the neural network weights. In deep learning models, the initial weights play a crucial role, and small changes in their values can lead to different convergence paths during training. Additionally, random sampling during the creation of the train and validation sets can also contribute to the variability in results
+
+**Question 2: From running the previous code multiple times, you may have noticed that the loss and accuracy can vary a lot between different training of the model. How would you proceed to obtain a better measurement of the model loss and accuracy (you don't have to implement it for the exercise)?**
+
+**Solution:**
+To obtain a better measurement of the model's loss and accuracy, techniques such as cross-validation can be used. Cross-validation involves splitting the dataset into multiple folds and training the model on different combinations of training and validation sets. By averaging the performance metrics over multiple runs, you can obtain a more reliable estimate of the model's generalization performance.
+
+**Question 3: Compare the performances (loss and accuracy) obtained on the train and validation sets. Which phenomenon do you recognize (you can try to retrain the model several times if you don't notice anything)? Why is it happening here and which solutions could you use to handle it (you don't have to implement them for the exercise)?**
+
+**Solution:**
+The phenomenon observed is likely overfitting. Overfitting occurs when the model performs well on the training set but poorly on the validation set, indicating that the model has memorized the training data instead of learning the underlying patterns. This can happen when the model is too complex relative to the amount of training data.
+
+To handle overfitting, following solutions can help:
+
+Regularization: Introduce regularization techniques like L2 regularization to penalize large weights.
+Dropout: Apply dropout during training to randomly deactivate a portion of neurons, preventing over-reliance on specific features.
+Reduce Model Complexity: Simplify the model architecture, reducing the number of parameters.
+Increase Training Data: If possible, acquire more diverse training data to provide the model with a broader range of examples.
+Implementing these solutions can help mitigate overfitting and improve the generalization performance of the model.
+
+- Add a function that apply a model to the environmental variables at every locations in Switzerland and plot the raster of predicted values. Then call this function with the previously trained model as input.
+```{r}
+map_pred <- function(env.var, model) {
+  row <- nrow(env.var)
+  col <- ncol(env.var)
+  layers <- nlayers(env.var)
+  r.arr <- raster::as.array(env.var)
+  r.mat <- matrix(r.arr, row * col, layers)
+  pred.array <- predict(model, r.mat)
+  pred.mat <- matrix(pred.array, row, col)
+  pred.raster <- raster(pred.mat)
+  extent(pred.raster) <- extent(env.var)
+  plot(pred.raster, col=rev(heat.colors(50)), box=F, axes=F, legend=T)
+  return(pred.raster)
+}
+
+res = map_pred(env.var, single_output_nn_l2)
+```
+
+- Compare the results obtained previously with the presence/absence data of *Milvus.migrans* by displaying them on a map.
+```{r}
+plot_obs_occurrences(species.names.selected, bird.occurrences)
+```
+
+## Exercise 2: Building multi-species prediction approaches
+In this exercise, you will first use the previous model to build an approach that performs prediction prediction for every species in the dataset. Then you will build a second model based on co-occurrences of bird species to predict the presence/absence of all species at the same time. 
+
+- Use ```generators_builder``` to build batch generators that output the vector of presence/absence of all species.
+```{r}
+# Modify generators_builder to handle multiple species
+multi_species_generators_builder <- function(dataset, env.var.names, species.names, 
+                                              proportion = 0.8, batch.size = 32) {
+  dataset <- dataset[, c(env.var.names, species.names)]
+  split <- initial_split(dataset, proportion)
+  train.dataset <- data.matrix(training(split))
+  validation.dataset <- data.matrix(testing(split))
+  
+  data_generator <- function(dataset, x, y, batch.size) {
+    rows <- 1:nrow(dataset)
+    function() {
+      if (length(rows) < batch.size) rows <<- 1:nrow(dataset)
+      selected.rows.i <- sample(1:length(rows), batch.size, replace = FALSE)
+      selected.rows <- rows[selected.rows.i]
+      x.values <- array(0, dim = c(batch.size, length(x)))
+      x.values[1:batch.size, ] <- array(dataset[selected.rows, x])
+      y.values <- array(0, dim = c(batch.size, length(y)))
+      y.values[1:batch.size, ] <- array(dataset[selected.rows, y])
+      rows <<- rows[-selected.rows.i]
+      
+      return(list(x.values, y.values))
+    }
+  }
+  
+  train.generator <- data_generator(
+    data = train.dataset,
+    x = env.var.names,
+    y = species.names,
+    batch.size = batch.size
+  )
+  
+  validation.generator <- data_generator(
+    data = validation.dataset,
+    x = env.var.names,
+    y = species.names,
+    batch.size = batch.size
+  )
+  
+  return(list("train" = train.generator, "validation" = validation.generator,
+              "train.length" = nrow(train.dataset),
+              "validation.length" = nrow(validation.dataset)))
+}
+
+# Use multi_species_generators_builder to build generators for multiple species
+multi_species_generators <- multi_species_generators_builder(bird.data, env.var.names, species.names)
+
+# Example: generate one batch
+batch_example <- multi_species_generators$train()
+
+# Example: inspect the structure of the generated batch
+str(batch_example)
+
+```
+```{r}
+multi_species_generators$train()
+```
+
+```{r}
+# Modify build_single_output_nn_l2 for 30 species
+build_multi_output_nn_l2 <- function(mod_append = "") {
+  # Name the model
+  model.name <- paste("nnet_", mod_append, sep="")
+  
+  model <- keras_model_sequential(name = model.name) %>%
+    layer_batch_normalization() %>%
+    layer_dense(units = 9, activation = "relu", kernel_regularizer = regularizer_l2(0.01)) %>%
+    layer_batch_normalization() %>%
+    layer_dense(units = 128, activation = "relu", kernel_regularizer = regularizer_l2(0.01)) %>%
+    layer_batch_normalization() %>%
+    layer_dense(units = 64, activation = "relu", kernel_regularizer = regularizer_l2(0.01)) %>%
+    layer_batch_normalization() %>%
+    layer_dense(units = 32, activation = "relu", kernel_regularizer = regularizer_l2(0.01)) %>%
+    layer_batch_normalization() %>%
+    layer_dense(units = 30, activation = "sigmoid", kernel_regularizer = regularizer_l2(0.01))
+  
+  return(model)
+}
+
+# Function to compile and train with early stopping for 30 species
+compile_and_train_multi_output_l2 <- function(model, species_generators, batch.size,
+                                               learning.rate, max.epochs, patience, verbose = T) {
+  history <- c()
+  model %>% compile(loss = "binary_crossentropy",
+                    optimizer = optimizer_adam(learning_rate = learning.rate),
+                    metrics = list("acc")) 
+  callbacks.nn <- list()
+  callbacks.nn <- append(callbacks.nn,
+                         callback_reduce_lr_on_plateau(monitor = "val_loss",
+                                                       patience = 3, factor = 0.1))
+  callbacks.nn <- append(callbacks.nn,
+                         callback_early_stopping(monitor = "val_loss",
+                                                 patience = patience, restore_best_weights = TRUE))
+  if (!dir.exists("./saved_models/")) dir.create("./saved_models/")
+  callbacks.nn <- append(callbacks.nn,
+                         callback_model_checkpoint(file.path("./saved_models/",
+                                                              paste(model$name, ".h5", sep = "")),
+                                                  monitor = "val_loss", save_best_only = T, mode = "min",
+                                                  save_freq = "epoch"))
+  history <- model %>% fit_generator(
+    generator = species_generators$train,
+    steps_per_epoch = as.integer(species_generators$train.length / batch.size),
+    epochs = max.epochs,
+    validation_data = species_generators$validation,
+    validation_steps = as.integer(species_generators$validation.length / batch.size),
+    callbacks = callbacks.nn,
+    verbose = verbose
+  )
+  return(history)
+}
+
+# Build and train the model with L2 regularization and early stopping for 30 species
+multi_output_nn_l2 <- build_multi_output_nn_l2()
+history_multi_output_l2 <- compile_and_train_multi_output_l2(
+  multi_output_nn_l2, multi_species_generators, 32, 0.1, 20, patience = 5
+)
+plot(history_multi_output_l2)
+
+```
+- Use a loop to train an MLP from exercise 2 for each species of the dataset. Add the best accuracy and loss (on the train and the validation set) obtained for each species to a dataframe. These values correspond to the performances of the MLP during the training step where the loss on the validation set is the lowest.
+
+- Build a new multi-species MLP model that is able to predict the presence/absence of all the species from the dataset in the same output. This new MLP should output a vector containing as many values as they are species. Hint: to do this, you only have to change one line of code from the previous MLP (and the name of the model).
+```{r}
+# Initialize a dataframe to store performance metrics
+performance_df_multi_species <- data.frame(
+  Species = character(),
+  BestTrainLoss = numeric(),
+  BestTrainAccuracy = numeric(),
+  BestValLoss = numeric(),
+  BestValAccuracy = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Loop through each species
+for (species in species.names) {
+  cat("Training model for species:", species, "\n")
+  
+  # Build generators for the current species
+  #species_generators <- multi_species_generators_builder(bird.data, env.var.names, species)
+  species_generators <- multi_species_generators_builder(bird.data, env.var.names, species)
+  
+  
+  # Build and train the model for the current species
+  multi_output_nn_l2 <- build_multi_output_nn_l2()
+  history_species_multi_output_l2 <- compile_and_train_multi_output_l2(
+    multi_output_nn_l2, species_generators, 32, 0.1, 20, patience = 5, verbose = FALSE
+  )
+  
+  # Find the epoch with the lowest validation loss
+  best_epoch_multi_output <- which.min(history_species_multi_output_l2$metrics$val_loss)
+
+  # Record performance metrics for the current species
+  species_performance_multi_output <- data.frame(
+    Species = species,
+    BestTrainLoss = history_species_multi_output_l2$metrics$loss[best_epoch_multi_output],
+    BestTrainAccuracy = history_species_multi_output_l2$metrics$acc[best_epoch_multi_output],
+    BestValLoss = history_species_multi_output_l2$metrics$val_loss[best_epoch_multi_output],
+    BestValAccuracy = history_species_multi_output_l2$metrics$val_acc[best_epoch_multi_output]
+  )
+  
+  # Append to the overall performance dataframe
+  performance_df_multi_species <- rbind(performance_df_multi_species, species_performance_multi_output)
+}
+
+# Display the performance dataframe for multi-species prediction
+print("Performance Metrics for Each Species (Multi-Species Prediction):")
+print(performance_df_multi_species)
+
+```
+- Train the multi-species MLP using the same data generator from the beginning of this exercise (we want to train both approaches with the same train/validation split).
+```{r}
+
+```
+
+## Exercise 3: Comparing single species and multi-species MLPs
+Now that you have trained both approaches on the same dataset split, you are going to compare their performances.
+
+- Plot the predictions of both approaches for species *Milvus.migrans*.
+```{r}
+```
+
+- Use the ```summary``` function to display the number of weights of both models.
+```{r}
+
+```
+
+**Question 4: Between the single species MLP applied to all species and multi-species MLP approach, which one takes the longest time to train (an approximate time is sufficient to answer this question)? Which one involves the most neural network weights? Which one uses the most computational power?**
+
+**Solution:**
+
+- Compare the best validation loss of the two multi-species approaches over all species.
+```{r}
+
+```
+**Question 5: Which approach is performing best based on the validation losses of the two approaches? Why do you think it is the case?**
+
+**Solution:**

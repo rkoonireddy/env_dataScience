@@ -1,0 +1,302 @@
+---
+title: "5: Introduction to machine learning - Exercise"
+author: Rohit Koonireddy
+date: "21 10 2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+### Intro 
+Now that you have learned the basics of LM, GLM and unsupervised machine learning you should be able to solve this exercise. 
+
+You will again work on the bird data set you know already from the tutorial. In addition, we will provide you with a number of additional species occurring in Switzerland. You will have land cover information (e.g. forest cover) for each grid cell as well as basic environmental data (e.g. temperature). 
+
+Imagine you are researching bird species in Switzerland and you want to identify the variables driving the patterns of species richness.
+
+### You will have these aims:
+
+#### 1. Load additional bird species into the data.  
+    1. Merge the environmental and bird variables and summarize your environmental data set and explain what you see.
+    2. Are there any correlations or missing data? 
+    3. If so, try to fill the missing values if possible, otherwise discard the rows. Find the most and least common bird species in the data.  
+```{r 1, warning=FALSE}
+# load the data set, most data you will encounter will be saved either as .txt or.csv format
+bird_env_mat <- read.csv(file = "data/bird_env_dat.csv")
+
+# change all "." in variable names to "_", in order to avoid confusion
+colnames(bird_env_mat) <- gsub("\\.","_", colnames(bird_env_mat))
+
+# Set the path to the folder containing the text files
+folder_path <- "data/bird_swiss/"
+
+# List all text files in the folder
+file_list <- list.files(folder_path, pattern = ".txt", full.names = TRUE)
+
+# Initialize an empty data frame to store the merged data
+merged_df <- data.frame()
+
+# Loop through each file and read it into a data frame
+for (file in file_list) {
+  temp_df <- read.table(file, sep = ";", header = TRUE)
+  colnames(temp_df) <- gsub("\\.","_", colnames(temp_df))
+  file_name <- tools::file_path_sans_ext(basename(file))
+  colnames(temp_df)[colnames(temp_df) == "occ"] <- file_name
+  # Merge the temporary data frame with the merged data frame
+  if (nrow(merged_df) == 0) {
+    # If merged_df is empty, assign the contents of temp_df
+    merged_df <- temp_df
+  } else {
+    # Otherwise, merge by common columns (adjust as needed)
+    merged_df <- merge(merged_df, temp_df, by =c("KoordID","x","y"), all = TRUE)
+  }
+  
+}
+
+all_birds_df <- merge(merged_df,bird_env_mat,by =c("KoordID","x","y"))
+colnames(all_birds_df) <- gsub(" ", "_", tolower(colnames(all_birds_df)))
+
+#remove the repeated ones <- whinchat is not there in the texts provided
+all_birds_df <- all_birds_df[, !(colnames(all_birds_df) %in% c("ptarmigan", "dipper"))]
+
+dim(all_birds_df)
+#str(all_birds_df)
+```
+#### 2. Calculate Species richness  
+1. How many species do we have in total, what does this tell us about the species composition?  
+2. Calculate species richness per grid cell (add a new column with the variable species richness).  
+```{r 2, warning=FALSE}
+#create df with only birds 
+only_birds_df <- all_birds_df[, !(colnames(all_birds_df) %in% c("koordid","x", "y", "elev_birds","prec_birds",
+                                                                "temp_birds","est_slope","forest_edge_sum",
+                                                                "forest_sum", "rassland_sum", "water_dist",
+                                                                "buildings_sum", "grassland_sum"))]
+
+birds_count <- data.frame(colSums(only_birds_df))
+birds_count$bird_species_name <- rownames(birds_count)
+rownames(birds_count) <- NULL
+colnames(birds_count) <- c("presence_count","bird_species_name")
+birds_count<- birds_count[,c("bird_species_name","presence_count")]
+birds_count
+```
+There are 78 bird species.
+
+Include the speices richness column
+```{r}
+library(dplyr)
+#species richness inclusion
+all_birds_df <- all_birds_df %>% mutate(species_richness = rowSums(dplyr::select(., accipiter_nisus:whinchat)))
+print(dim(all_birds_df))
+#head(all_birds_df)
+```
+Check for species presence in on a map
+```{r warning=FALSE}
+print(colnames(all_birds_df))
+
+#graphs for all species
+# loading the raster library
+library("raster")
+raster::plot(raster::rasterFromXYZ(all_birds_df[,2:21]))
+```
+```{r warning=FALSE}
+#segregate the fields that are needed
+rel_birds_df_1 <- all_birds_df[,colnames(all_birds_df) %in% c("elev_birds","prec_birds","temp_birds" ,"est_slope",
+                                            "forest_edge_sum","forest_sum","grassland_sum",
+                                            "water_dist","buildings_sum","species_richness")]
+
+
+rel_birds_df_2 <- all_birds_df[,colnames(all_birds_df) %in% c("elev_birds","prec_birds","est_slope",
+                                            "forest_edge_sum","forest_sum","grassland_sum",
+
+                                                                                        "water_dist","buildings_sum","species_richness")]
+########
+# Calculate the number of NA values in each column
+nas_per_column_1 <- colSums(is.na(rel_birds_df_1))
+
+print("NA columns for matrix with temp_birds column")
+# Print the columns and the number of NAs in each column for columns with NAs
+for (col_name in colnames(rel_birds_df_1)) {
+  na_count <- nas_per_column_1[col_name]
+  if (na_count > 0) {
+    cat("Column:", col_name, "- Number of NAs:", na_count, "\n")
+  }
+}
+
+
+#remove the NA rows -> not being so many
+rel_birds_df_2 <- na.omit(rel_birds_df_2)
+print("NA columns for matrix without temp_birds column")
+#######
+########
+# Calculate the number of NA values in each column
+nas_per_column_2 <- colSums(is.na(rel_birds_df_2))
+
+print("NA columns for matrix with temp_birds column")
+# Print the columns and the number of NAs in each column for columns with NAs
+for (col_name in colnames(rel_birds_df_2)) {
+  na_count <- nas_per_column_2[col_name]
+  if (na_count > 0) {
+    cat("Column:", col_name, "- Number of NAs:", na_count, "\n")
+  }
+}
+
+#remove the NA rows -> not being so many
+rel_birds_df_1 <- na.omit(rel_birds_df_1)
+print("Dimensions of matrix after removing the NA rows")
+#######
+
+
+#check for correlation
+require("corrplot")
+library(corrplot)
+#check for correlation
+correlation_matrix_1 <- cor(rel_birds_df_1)
+correlation_matrix_2 <- cor(rel_birds_df_2)
+
+par(mai = c(1, 1, 1, 1))
+par(pin = c(6, 4))
+
+
+# First Correlation Plot
+corrplot(correlation_matrix_1, method = "number", use = "complete",
+         tl.col = "black", type = "upper", tl.srt = 90,
+         diag = TRUE, sig.level = 0.05, insig = "blank",
+         addCoef.col = "black", number.cex = 0.7,
+         main = "Correlation Plot 1",
+         col = colorRampPalette(c("darkred", "white", "darkgreen"))(100),
+         lim = c(-1, 1))
+
+plot.new()
+# Second Correlation Plot
+corrplot(correlation_matrix_2, method = "number", use = "complete",
+         tl.col = "black", type = "upper", tl.srt = 90,
+         diag = TRUE, sig.level = 0.05, insig = "blank",
+         addCoef.col = "black", number.cex = 0.7,
+         main = "Correlation Plot 2",
+         col = colorRampPalette(c("darkred", "white", "darkgreen"))(100),
+         lim = c(-1, 1))
+
+# Reset the layout to its default (1 plot per window)
+par(mfrow = c(1, 1))
+
+```
+Based on the correlation plots, we see that removing the additional 85 rows of data doesn't seem to affect the overall correlation matrix.
+However, temp_birds seem to have a strong and significant correlation to species richness. So use the temp_birds column too and use it further for analysis. 
+```{r warning=FALSE}
+# we copy the rel_birds_df_1 to comparison_df
+bird_model_small <- rel_birds_df_1
+print(dim(bird_model_small))
+```
+Here we see that we have the 
+- KoordID: a unique ID for each sampling location. It is composed of the first three figures of the x- and y-coordinates (km)
+- x: Longitude coordinate of each gridcell
+- y: Latitude coordinate of each gridcell
+Environmental variables that have been extracted from rasters or shapefiles
+- elev_birds: elevation extracted from the gridcell, m
+- prec_birds: precipitation extracted from the gridcell, mm
+- temp_birds: temperature extracted from the Chelsea temperature grid, C°
+- forest_edge_sum: percentage of forest edge per gridcell
+- forest_sum: percentage of forest per gridcell
+- grassland_sum: percentage of grassland per gridcell
+- water_dist: distance to nearest body of water per gridcell
+- buildings_sum: sum of buildings within the grid cell
+
+#### 3. Build a model to explain species richness by applying a GLM with either gaussian, binomial of poisson family and the right link-function  
+    1. Explain your choice of model family, report your model output (Coefficients, p values, model-fit) and give an indication of which variables lead to an increase or decrease of  species richness.
+    Answer: Species richness is affected primarily by elevation (elev_birds) in a negative way, followed by  temperate (temp_birds) in a positive way followed by forest edge sum. 
+    2. Report the estimated species richness, for 2000m elevation, 10°C temp, 600mm precipitation, 10 for slope, 20 forest.edge, 50 forest, 55 grassland, 2300m distance to water, 4 buildings.  
+    3. Is there something that could be improved, is this model biological meaningful?  
+```{r}
+colnames(bird_model_small)
+```
+
+```{r 3, warning=FALSE}
+#checking model goodness
+lm1 <- lm(species_richness ~ elev_birds + prec_birds + temp_birds+ est_slope  + forest_edge_sum + forest_sum + grassland_sum + water_dist + buildings_sum, data = all_birds_df)
+Sum_mod <- summary(lm1)
+print(Sum_mod)
+names(Sum_mod)
+Sum_mod$coefficients
+r2 <- Sum_mod$r.squared
+adj_r2 <- Sum_mod$adj.r.squared
+Sum_mod$adj.r.squared
+
+par(mfrow = c(2, 2))
+plot(lm1)
+all_birds_df$predic_temp <- predict.lm(lm1, all_birds_df) 
+
+
+#for 2000m elevation, 10°C temp, 600mm precipitation, 10 for slope, 20 forest.edge, 50 forest, 55 grassland, 2300m distance to water, 4 buildings.  
+to_predict_on_data <- data.frame(elev_birds = 2000, prec_birds = 600, temp_birds = 10, est_slope = 10, 
+                                 forest_edge_sum = 20, forest_sum = 50, grassland_sum = 55, 
+                                 water_dist = 2300, buildings_sum = 4)
+
+predicted_species_richness <- predict(lm1, newdata = to_predict_on_data)
+print("Predicted value for given blocks:")
+print(predicted_species_richness)
+```
+Through multi-variate linear regression, we get a value of ~31 birds in the given setting. Also, we see that the following axes are significant (p<0.05) drives of the species_richness : elev_birds,prec_birds,temp_birds,forest_edge_sum, forest_sum,grassland_sum. You can see the R-squared at 0.7338 and adjusted r-squared at 0.7275. The value of 31 bird species seems reasonable but it's important to critically assess this result. The prediction of 31 species appears high given the relatively low temperature of 10°C. This suggests that the model might not fully account for the temperature constraint on bird diversity. Additionally, the prediction assumes all conditions are met simultaneously, which may not reflect real-world ecological dynamics. The actual species richness could be influenced by more complex interactions and specific regional factors.
+
+#### 4. PCAs can not only inform you on correlations within data, but can be powerful in creating "independent" variables
+    1. Run a PCA on the variables, extract the axes values for all axes you need to explain more than 50% of the variance, and then use these axes in a GLM with species richness.  
+    2. How could you interpret the results of this model?  
+    3. compared to the GLM with all the environmental variables? Elaborate on the difficulties of this approach. 
+```{r 4, warning=FALSE}
+library (ade4)
+names(bird_model_small)
+
+bird_pca_dudi <- dudi.pca(bird_model_small[, !(colnames(bird_model_small) %in% "species_richness")], 
+                         scale = T, center = T, 
+                         scannf = FALSE, nf = 9)
+
+
+print("PCA Summary")
+class(bird_pca_dudi)
+summary(bird_pca_dudi) #call a summary screen for the PCA
+
+print("Eigen values")
+bird_pca_dudi$eig
+sum(bird_pca_dudi$eig)
+# this gets you the eigenvalues of the individual axes
+
+print("Percentage capture")
+perc <- round((bird_pca_dudi$eig/sum(bird_pca_dudi$eig))*100,2)
+names(bird_pca_dudi)
+perc
+sum(perc)
+cumsum(perc) 
+
+bird_pca_dudi$co
+correlation_variables <- cor(bird_model_small)
+print(correlation_variables)
+
+s.corcircle(bird_pca_dudi$co)
+
+```
+```{r warning=FALSE}
+library(factoextra)
+biplot(bird_pca_dudi, cex = 0.1)
+
+fviz_pca_biplot(bird_pca_dudi, label = "var")
+```
+To do GLM analsis, I select the top three PCAxes which contibute to over 70% of the data.
+```{r}
+top_three_axes <- as.matrix(bird_pca_dudi$co[, 1:3])
+new_features <- as.matrix(bird_model_small[, !(colnames(bird_model_small) %in% "species_richness")]) %*% top_three_axes
+dim(new_features)
+
+data_for_glm <- data.frame(new_features, species_richness = bird_model_small$species_richness)
+glm_model_1 <- glm(species_richness ~ ., data = data_for_glm, family = poisson)
+
+summary(glm_model_1)
+```
+```{r}
+#another version using gaussian
+glm_model_2 <- glm(species_richness ~ ., data = data_for_glm, family = gaussian)
+
+summary(glm_model_2)
+```
+We can see better results using "Poisson" distribution already. It is important to notice that working with GLM is difficult as one must assume / clearly understand the underlying distribution and attributes.
+
+

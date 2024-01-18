@@ -1,0 +1,844 @@
+---
+title: "13: Application II"
+author: "Rohit Koonireddy"
+output:
+  html_document:
+    keep_md: yes
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval=TRUE, warning=FALSE)
+set.seed(6)
+```
+
+# Application III {#ch-13}
+
+The goal of Application III is to use all the modelling techniques acquired throughout the course, and compare their performance with respect to a specific environmental system modelling problem.
+
+## Introduction
+### Learning Goals 
+After this exercise session you shall be able to
+
+- have a clear overview of how standard statistical models and machine learning models connect,
+- assess the performance of a method for a particular modelling objective,
+- have a clear guideline to tackle environmental systems modelling problems. 
+
+### Key Points from Previous Lectures  
+- Several types of models are commonly used in environmental sciences. Those include 
+  - linear models, 
+  - general linear models, 
+  - random forests, and 
+  - neural networks.
+- [**Linear models**](https://en.wikipedia.org/wiki/Linear_model) are suited for obtaining linear relationships between predictors and variables
+\begin{equation}
+  y = \beta_0 + \beta_1 x \tag{General linear model}
+\end{equation}
+- [**Generalised linear models**](https://en.wikipedia.org/wiki/Generalized_linear_model) are flexible generalization of linear models, allowing the linear model $\beta_0 + \beta_1 x$ to be related to the response variable $y$ via a nonlinear "link" function (e.g., logit link function binary response variables, for predicting presence/absence).
+\begin{equation}
+  y = \frac{1}{1 + e^{(\beta_0 + \beta_1 x)}} \tag{Logistic model for binary response variables}
+\end{equation}
+- [**Randoms forests**](https://en.wikipedia.org/wiki/Random_forest) are used for classification or label predictions.
+- [**Neural Networks**](https://en.wikipedia.org/wiki/Artificial_neural_network) can be used for capturing more complex relationships between predictors and variable. In contrast non (generalised) linear models, neural network parameters are more difficult to interpret. 
+\begin{equation}
+  y = NN(x) = W_3\sigma_2(W_2\sigma_1(W_1 x + b_1) +b_2) + b_3
+\end{equation}
+- [**Convolutional Neural Networks**](https://en.wikipedia.org/wiki/Convolutional_neural_network) are a special type of neural networks which are suited to capture the effect of spatial structure. 
+
+## Application
+### Problem Statement 
+
+The intake of carbon by the terrestrial biosphere has a major impact on the carbon cycle, and is therefore of considerable scientific interest. Terrestrial plants fix atmospheric CO$_2$ through photosynthesis, synthesising organic compounds. The carbon biomass that vegetation synthetises in a given length of time is estimated by a measure called Gross Primary Production (GPP), expressed in mass of carbon per unit area per year ($gC.m^{-2}.yr^{-1}$). GPP is continuously measured at several hundred of sites, distributed across the globe, through the international [FLUXNET](https://en.wikipedia.org/wiki/FLUXNET) initiative. The oldest running sites have been recording data for over twenty years. These data provide an opportunity for understanding ecosystem fluxes and how they are affected by environmental covariates. 
+
+<!-- , but a global mapping of GPP across the Earth would be very valuable -->
+The goal of this application is to spatially upscale the available data, interpolating between the measurement sites thanks to environmental predictors. This is a challenge as previous research has shown that although site-specific models can be trained successfully, the generalisation of these models to new sites is much more difficult. We propose here to use the [Normalised Difference Vegetation Index](https://en.wikipedia.org/wiki/Normalized_difference_vegetation_index) (NDVI) as a predictor of GPP. NDVI is a measure of spectral reflectance and relates to the photosynthetic rate of vegetation in given location.  NDVI is a good predictor candidate, because it is easy to obtain at a fine spatial resolution through satellite imagery.
+
+Your task is to build and compare, based on different criteria, models that can estimate GPP from NDVI data. In the end, we should be left with a model $\mathcal{M}$ that best captures the relationship between NDVI and GPP.
+
+\begin{equation}
+\overbrace{y_{GPP}}^{\text{response variable}} = \mathcal{M}(\underbrace{x_{NDVI}}_{\substack{\text{NDVI-based}\\\text{ predictors}}})
+\end{equation}
+
+### Loading packages
+```{r message=FALSE, warning=FALSE}
+rm(list=ls())
+library(tidyverse)
+library(testit) # to use the `assert` function
+library(imputeTS) # for na_interpolation (CNN imputation)
+library(reticulate) # for array_reshape
+library(raster)
+library(imager)
+library(keras)
+#use_condaenv('r-reticulate')
+```
+
+### Data preparation 
+
+As a first step of any modeling problem, we need to get and process the data to be used.
+
+We have at our disposal the GPP values measured at 71 measurement locations, displayed below, at different period of the year. GPP values correspond to the `y` values in the CSV file `data/flux_dataset.csv`.
+
+<center><img src="./figures/location_of_towers.png" style="width:70%;" class="center"></center>
+
+For each location and date, we have an NDVI image, i.e. an NDVI raster of side 6km centered on the measurement location. The resolution of each raster is 30 m per pixel. Therefore, in total for a specific (location, date) pair we have a raster with a side of 6km / (30m / pixel) = 200 pixels and thus 200 x 200 = 40000 pixels per pair.
+
+<center><h4>NDVI raster (black square) centered around the measurement station of CH Oerlikon, at month 02/2010</h4></center>
+<center><img src="./figures/extracted_region_CH_Oe2.jpg" style="width:45%;" class="center"></center>
+
+#### Loading the response variables
+
+* Load the file containing the response variables to be interpolated, and put it in a dataframe. Print some lines of the dataframe to understand what does it contain.
+
+```{r message=F}
+flux_data <- read.csv("data/flux_dataset.csv")
+head(flux_data)
+colnames(flux_data)
+```
+
+* The data set contains measures for different locations, at different time of the year. How many total data points (1 sample = 1 pair (location, date)) do we have, and how many unique locations do we have? Write a piece of code to print this information.
+```{r}
+total_data_points <- nrow(flux_data)
+unique_locations <- length(unique(flux_data$sitename))
+cat("Total data points:", total_data_points, "\n")
+cat("Unique locations:", unique_locations, "\n")
+```
+
+
+#### Loading NDVI files
+ * Now list the NDVI files in the folder `./data/NDVI`, as a list of strings containing the path to the files. Make sure that we have done a good job, i.e. that there is as much files as the number of data points contained in the fluxnet csv file. Display one of those strings. 
+```{r }
+# Specify the folder path for NDVI files
+ndvi_folder <- "./data/ndvi"
+
+# List NDVI files
+ndvi_files <- list.files(path = ndvi_folder, full.names = TRUE)
+
+# make sure that we have as much x as y
+# Check if the number of NDVI files matches the total data points
+if (length(ndvi_files) == total_data_points) {
+  cat("Number of NDVI files matches the total data points.\n")
+} else {
+  cat("Warning: Number of NDVI files does not match the total data points!\n")
+}
+
+# Display one of the NDVI file paths
+cat("Sample NDVI file path:", ndvi_files[1], "\n")
+```
+* Can you plot one of those rasters? 
+
+**Hint**: The .rds files store a list of length 40,000 of GPP values, that needs to be rearranged into a matrix of size 200 x 200. Use the function `image` to display the matrix.
+```{r}
+DIM_RASTER <- 200
+
+# Read the .rds file
+NDVI <- readRDS(ndvi_files[3])
+
+# Rearrange the list into a matrix
+ndvi_matrix <- matrix(unlist(NDVI), nrow = DIM_RASTER, ncol = DIM_RASTER, byrow = TRUE)
+na_count_in_each_row <- apply(ndvi_matrix, 1, function(col) sum(is.na(col)))
+
+#cat("\nNA values in each row:\n")
+#print(na_count_in_each_row)
+
+image(ndvi_matrix, main = "NDVI Raster", col = terrain.colors(20))
+```
+* What does this plot inform you of?
+Shows the vegetation as per the NVDI index. There is NA data in the RDS that is shown as white spaces in the data similar to lines in the data.
+
+##### Preprocessing
+NDVI rasters present some anomalies, that we first need to fix.
+
+# Create an empty vector to store the percentage of healthy pixels for each NDVI file
+```{r}
+healthy_pixels <- c()
+
+# Loop through each NDVI file
+for (ndvi_file in ndvi_files) {
+  # Read the NDVI file
+  ndvi_data <- readRDS(ndvi_file)
+  
+  # Convert the NDVI data to a matrix
+  ndvi_matrix <- matrix(unlist(ndvi_data), nrow = DIM_RASTER, ncol = DIM_RASTER, byrow = TRUE)
+
+  # Calculate the percentage of healthy pixels based on the threshold values
+  threshold_value <- c(-10000, 10000)
+  percentage_healthy <- sum(!is.na(ndvi_matrix) & ndvi_matrix >= threshold_value[1] & ndvi_matrix <= threshold_value[2]) / sum(!is.na(ndvi_matrix)) * 100
+
+  # Store the result in the vector
+  healthy_pixels <- c(healthy_pixels, percentage_healthy)
+
+  # Print the result (optional)
+  # print(paste("Percentage of healthy pixels in this file:", percentage_healthy, "%"))
+}
+
+# Print the head of the vector
+sum(healthy_pixels>40)
+```
+*First, I want to handle the NA values
+- i use the following to handle the NA values.This uses image inpainting method.
+```{r message=FALSE, warning=FALSE}
+# all the functions needed to compress and handleNA values in the images
+
+library(imager)
+# Fill NA values in a matrix using various inpainting methods
+fill_na_values_matrix <- function(input_matrix) {
+  
+  # Create an image object from the matrix
+  img <- as.cimg(input_matrix)
+  
+  img <- inpaint(img,2) # i chose sigma 2 here. I will use this for all images.
+  img <- as.matrix(img)
+  #image(img, main = "NDVI Raster after inpaint", col = terrain.colors(20))
+
+  return(img)
+}
+
+# resize and compressing images
+own_crop_function <- function(input_matrix, subraster_size = 50) {
+  # Crop
+  center <- floor((nrow(input_matrix) + 1) / 2)
+  cropped_indices <- (center - floor(subraster_size / 2)):(center + floor(subraster_size / 2) - 1)
+  matrix_cropped <- input_matrix[cropped_indices, cropped_indices]
+  #print(paste0("Dimension Size:  ",dim(matrix_cropped)))
+  #image(matrix_cropped, main = "NDVI Raster after own compression", col = terrain.colors(20))
+  return(matrix_cropped)
+}
+
+resize_from_imager <- function(input_matrix) {
+  img <- as.cimg(input_matrix)
+  img <- resize(img,size_x = 50, size_y = 50, interpolation_type = 1)
+  img <- as.matrix(img)
+  #image(img, main = "NDVI Raster after imager compression", col = terrain.colors(20))
+}
+```
+
+* To reduce the computational load, only consider a subraster of size 50x50 pixel, with same center as the original raster.
+**Hint**: Healthy pixels have a NDVI value comprise between -10000 and 10000 (and, of course, are not `NA`.). Before writing the loop, start computing the statistics for only one file, it will be easier to debug! Going through all the files may take some time.
+```{r}
+ndvi_files_used <- ndvi_files[healthy_pixels>40]
+
+resize_folder <- "./data/resize_ndvi"
+crop_folder <- "./data/cropped_ndvi"
+
+#go through all the relevant ndvi files and save them in a seperate folder
+for (ndvi_file in ndvi_files_used) {
+  DIM_RASTER = 200
+  ndvi_data <- readRDS(ndvi_file)
+  ndvi_matrix <- matrix(unlist(ndvi_data), nrow = DIM_RASTER, ncol = DIM_RASTER, byrow = TRUE)
+  
+  cropped_matrix <- own_crop_function(fill_na_values_matrix(ndvi_matrix))
+  resize_matrix <- resize_from_imager(fill_na_values_matrix(ndvi_matrix))
+
+  # Extract file name
+  file_name <- tools::file_path_sans_ext(basename(ndvi_file))
+  
+  # Save resized matrix to the resize folder
+  saveRDS(resize_matrix, file.path(resize_folder, paste0(file_name, "_resized.rds")))
+  saveRDS(cropped_matrix, file.path(crop_folder, paste0(file_name, "_cropped.rds")))
+}
+```
+
+* Discard the `flux_data` entries where the corresponding raster has less than 40% of healthy pixels.
+
+```{r}
+#get all the files that have only healthy pixels
+flux_data_filtered <- flux_data[healthy_pixels>40,]
+length(ndvi_files_used)
+dim(flux_data_filtered)
+```
+
+<!-- As mentioned in the beginning, the size of each NDVI image is 200 x 200 pixel. To avoid memory issues and facilitate fast training we crop the images to 50 x 50 pixel keeping the same center. -->
+**Hint**: to obtain the raster, you can use
+```{r sample cod for help, eval=FALSE, include=FALSE}
+raster <- matrix(runif(40000),nrow=200)
+cropped_dim <- 75:124
+raster_cropped <- raster[cropped_dim,cropped_dim]
+
+healthy_pixels <- c()
+
+for(j in 1:length(ndvi_files)){
+  # read NDVI file
+ 
+  # calculate percentage of healthy pixels
+  percentage <- ...
+
+  healthy_pixels <- c(healthy_pixels, percentage)
+}
+head(healthy_pixels)
+```
+
+
+#### Computing summary statistics
+
+You have point estimates for the GPP, but rasters of NDVI as predictors. A good idea would be to compute summary statistics of the rasters, that can be turned into predictors to be further fed into the statistical model. 
+
+* Think of four different summary statistics that you can compute from the data. Build a loop, that goes through each file of `ndvi_files`, and fills in 4 lists containing each of the summary statistics, for each of those files. 
+
+```{r}
+# get all the relevant ndvi files names in one place: 
+
+# Specify the folder path for NDVI files
+ndvi_folder_og <- "./data/ndvi"
+ndvi_folder_crop <- "./data/cropped_ndvi"
+ndvi_folder_resize <- "./data/resize_ndvi"
+
+# List NDVI files
+ndvi_files_og <- list.files(path = ndvi_folder_og, full.names = TRUE)
+ndvi_files_crop <- list.files(path = ndvi_folder_crop, full.names = TRUE)
+ndvi_files_resize <- list.files(path = ndvi_folder_resize, full.names = TRUE)
+```
+
+**Hint:** Make sure to keep only the rasters which have more than 40% healthy pixels.
+```{r}
+# i do all the rest of the calculations for the ones with >40% healthy pixels only
+# Loop through each NDVI file
+get_summary_stats_df <- function(used_files) {
+  # Initialize lists to store summary statistics and file names
+  mean_values <- list()
+  sd_values <- list()
+  skewness_values <- list()
+  kurtosis_values <- list()
+  file_names <- character()
+  for (j in seq_along(used_files)) {
+    # Read the NDVI file
+    ndvi_data <- readRDS(used_files[j])
+    ndvi_matrix <- matrix(unlist(ndvi_data), nrow = DIM_RASTER, ncol = DIM_RASTER, byrow = TRUE)
+    
+    # Compute summary statistics
+    mean_values[[j]] <- mean(ndvi_matrix, na.rm = TRUE)
+    sd_values[[j]] <- sd(ndvi_matrix, na.rm = TRUE)
+    skewness_values[[j]] <- e1071::skewness(ndvi_matrix, na.rm = TRUE)
+    kurtosis_values[[j]] <- e1071::kurtosis(ndvi_matrix, na.rm = TRUE)
+    
+    # Store the file name
+    file_names[j] <- used_files[j]
+  }
+  
+  # Convert lists to data frames
+  mean_df <- data.frame(matrix(unlist(mean_values), nrow = length(mean_values), byrow = TRUE))
+  sd_df <- data.frame(matrix(unlist(sd_values), nrow = length(sd_values), byrow = TRUE))
+  skewness_df <- data.frame(matrix(unlist(skewness_values), nrow = length(skewness_values), byrow = TRUE))
+  kurtosis_df <- data.frame(matrix(unlist(kurtosis_values), nrow = length(kurtosis_values), byrow = TRUE))
+  
+  # Set column names
+  colnames(mean_df) <- paste0("Mean_", seq_len(ncol(mean_df)))
+  colnames(sd_df) <- paste0("SD_", seq_len(ncol(sd_df)))
+  colnames(skewness_df) <- paste0("Skewness_", seq_len(ncol(skewness_df)))
+  colnames(kurtosis_df) <- paste0("Kurtosis_", seq_len(ncol(kurtosis_df)))
+  
+  # Combine all summary statistics into one data frame
+  summary_statistics_df <- cbind(file_name = file_names, mean_df, sd_df, skewness_df, kurtosis_df)
+  
+  return(summary_statistics_df)
+}
+
+
+# Print the summary statistics data frame
+crop_summary_stats_df <- get_summary_stats_df(ndvi_files_crop)
+resize_summary_stats_df <- get_summary_stats_df(ndvi_files_resize)
+og_summary_stats_df <- get_summary_stats_df(ndvi_files_og)
+```
+
+- Check the dimensions of the stats dataframes
+```{r}
+dim(crop_summary_stats_df)
+dim(resize_summary_stats_df)
+dim(og_summary_stats_df)
+```
+```{r}
+colnames(flux_data)
+head(flux_data)
+```
+* Build a dataframe `df_data`, that contains the predictors, as well as the response variable GPP. Scale both the predictors and response variables. 
+```{r}
+# create dataframe 
+df_data <- data.frame(flux_data_filtered[,-c(1:4)])
+
+# scaling the data, excluding the first column which contains the locations
+df_data_scaled <- as.data.frame(scale(df_data))
+print(head(df_data))
+```
+Alright, that's it with the data! Let's now start with the interesting bit.
+
+### Linear model
+We first build a linear model of the form $$y_{GPP}= f(x_{NDVI})= W x_{NDVI}+ B$$ where $x_{NDVI}$ is the NDVI based vector of predictors. 
+
+#### Standard fit
+Use the function `lm` to build a linear model, and fit it with `df_data`.
+- Measure the time required to fit the model. 
+- Print a summary of the fit. 
+- Which predictor has the strongest effect on GPP? Do all the predictors have a significant effect on the response variable?
+```{r}
+# fit the model
+response_variable <- names(df_data)[1]
+
+# fit the model
+start_time <- Sys.time()
+my_lm_model <- lm(paste(response_variable, "~ ."), data = df_data_scaled)
+end_time <- Sys.time()
+lm_training_time <- difftime(end_time, start_time, units = "mins")
+df_data_scaled$sitename <- flux_data_filtered$sitename
+# Print summary of the fit
+summary(my_lm_model)
+
+cat("LM training time", as.numeric(lm_training_time), "mins")
+```
+
+* Extract the R2 score of the model and store it in a variable. We will need it later on.
+```{r}
+# Extract the R-squared score of the model
+lm_r_squared <- summary(my_lm_model)$r.squared
+
+# Store the R-squared score in a variable
+cat("R-squared:", lm_r_squared, "\n")
+
+```
+
+#### Cross validation
+Our goal is to build a model that generalizes, to spatially upscale the GPP measurements. We should therefore perform a cross validation of our model, to make sure that the relationships it captures generalize well. For this, we propose to perform a [k-fold cross validation](https://en.wikipedia.org/wiki/Cross-validation_(statistics)#Leave-p-out_cross-validation):
+
+"*In k-fold cross-validation, the original sample is randomly partitioned into k equal sized subsamples. Of the k subsamples, a single subsample is retained as the validation data for testing the model, and the remaining k − 1 subsamples are used as training data. The cross-validation process is then repeated k times, with each of the k subsamples used exactly once as the validation data. The k results can then be averaged to produce a single estimation.*" (source: Wikipedia)
+
+- Write a loop that excludes, at each iteration, 10 of the sites, and evaluate the mean squared error (MSE) on the excluded sites. For each iteration, store the MSE in a list, and finally evaluate the model performance by printing the mean MSE obtained on the out of sample data (cross validation MSE). Store this value in a variable.
+
+```{r}
+#look at the sites
+length(unique(flux_data_filtered[,"sitename"]))
+flux_independent_variables <- c("fpar_loess_per_month","TA_F_per_month","SW_IN_F_per_month","LW_IN_F_per_month",
+                              "VPD_F_per_month","PA_F_per_month","P_F_per_month", "WS_F_per_month","CO2_F_MDS_per_month")
+flux_dependent_variables <- "y"
+```
+
+**Hint:** You can use the function `cut` to generate the indices of the subsamples to be excluded, at each iteration.
+```{r}
+#create folds data and check
+train_sitenames_count <- 61
+k <- 10 #folds
+mse_per_fold <- list()
+
+for (i in 1:k){
+  train_sitenames <- sample(unique(df_data_scaled$sitename), train_sitenames_count)
+  test_sitenames <- setdiff(unique(df_data_scaled$sitename), train_sitenames)
+  df_train <- df_data_scaled[df_data_scaled$sitename %in% train_sitenames, ]
+  df_test <- df_data_scaled[df_data_scaled$sitename %in% test_sitenames, ]
+  my_lm_model_cv <- lm(formula(paste(flux_dependent_variables, "~", paste(flux_independent_variables, collapse = "+"))), data = df_train)
+  pred <- predict(my_lm_model_cv, newdata = df_test)
+  mse <- mean((df_test$y - pred)^2, na.rm = TRUE)
+  mse_per_fold[[i]] <- mse
+  cat(paste("Fold", i, "MSE:", mse, "\n"))
+}
+
+# Calculate the mean MSE across all folds
+cv_mse_lm <- mean(unlist(mse_per_fold), na.rm = TRUE)
+cat(paste("\n", "CV MSE:", cv_mse_lm, "\n"))
+
+#setequal(unique(df_data_scaled$sitename), c(train_sitenames, test_sitenames))
+```
+### Feed forward neural network
+We now turn to a solution involving a feed forward neural network. We use the Keras library.
+```{r message=FALSE, warning=FALSE}
+## Loading the required libraries 
+library(keras) # Python library for deep learning
+```
+
+* Define a function `init_net()` that returns a neural network. The neural network shoud consist of
+ 
+   - an input layer, with dimensions the number of features x,
+   - a hidden layer `layer_dense`, with relu activation, with a size of 10,
+   - a hidden layer `layer_dense`, with relu activation, with a size of 5,
+   - an ouput layer, of size 1 with linear activation.
+The function `init_net()` should return a compiled neural network, using the Adam optimizer, with a learning rate `lr=0.01`.
+
+```{r}
+# FFNN
+init_net <- function() {
+  my_nn_model <- keras_model_sequential()
+  my_nn_model %>% 
+    layer_dense(units = 10, activation = 'relu', input_shape = ncol(df_data) - 1) %>%
+    layer_dense(units = 5, activation = 'relu') %>%
+    layer_dense(units = 1, activation = 'linear')
+
+  # Optimizer
+  opt <- optimizer_adam(learning_rate = 0.01)
+
+  # Compile
+  compile(my_nn_model, loss = 'mse', optimizer = opt)
+
+  my_nn_model
+}
+```
+
+#### Standard fit
+With the function `init_net()`, define a neural network `my_nn_model` and use `df_data` to train `my_nn_model`:
+ 
+ - use a batch size of 512,
+ - train the neural network over 100 epochs,
+ - measure the time required to fit the model,
+ - plot the training history, to make sure that the training went smoothly,
+ - compute the R2 of the trained neural network, and store it for later on.
+ 
+```{r}
+any_na <- any(is.na(df_data_scaled))
+print(any_na)
+print(colSums(is.na(df_data_scaled)))
+df_data_scaled_no_na <- na.omit(df_data_scaled)
+```
+```{r}
+dim(df_data_scaled)
+dim(df_data_scaled_no_na)
+dim(as.matrix(df_data_scaled_no_na[, flux_independent_variables, drop = FALSE]))
+```
+```{r message = FALSE}
+# Training
+start_time <- Sys.time()
+my_nn_model <- init_net()
+
+
+history <- my_nn_model %>% fit(
+  x = as.matrix(df_data_scaled_no_na[, flux_independent_variables, drop = FALSE]),
+  y = df_data_scaled_no_na$y,
+  epochs = 100,
+  batch_size = 512,
+  validation_split = 0.2,
+  verbose = 0
+)
+
+end_time <- Sys.time()
+
+#training time out
+ffnn_training_time = difftime(end_time, start_time, units="mins")
+cat("FFNN training time", ffnn_training_time, "mins")
+```
+
+```{r}
+# Plot training history
+plot(history)
+
+# R2
+pred <- predict(my_nn_model, as.matrix(df_data_scaled_no_na[, flux_independent_variables, drop = FALSE]))
+r2_ffnn <- cor(df_data_scaled_no_na$y, pred)^2
+cat("R2 =", r2_ffnn, "\n")
+```
+
+#### Cross validation
+
+* Perform the same cross validation experiment as with the linear model, and store the cross validation MSE.
+**Hint**:  Make sure to redefine the model with `init_net` at each loop.
+```{r message = FALSE}
+train_sitenames_count <- 10
+k <- 10 #folds
+mse_per_fold_ffnn <- list()
+
+for (i in 1:k){
+  test_sitenames <- sample(unique(df_data_scaled_no_na$sitename), train_sitenames_count)
+  train_sitenames <- setdiff(unique(df_data_scaled_no_na$sitename), train_sitenames)
+  df_train <- df_data_scaled_no_na[df_data_scaled_no_na$sitename %in% train_sitenames, ]
+  df_test <- df_data_scaled_no_na[df_data_scaled_no_na$sitename %in% test_sitenames, ]
+  start_time <- Sys.time()
+  history <- my_nn_model  %>% fit(
+  x = as.matrix(df_train[, flux_independent_variables, drop = FALSE]),
+  y = df_train$y,
+  epochs = 100,
+  batch_size = 512,
+  validation_split = 0.2,
+  verbose = 0
+  )
+  end_time <- Sys.time()
+  ffnn_training_time_cv <- difftime(end_time, start_time, units = "mins")
+  
+  # Make predictions on the test set
+  pred <- predict(my_nn_model, as.matrix(df_test[, flux_independent_variables, drop = FALSE]))  # Adjust this based on your data
+  
+  # Calculate MSE
+  mse <- mean((df_test$y - pred)^2, na.rm = TRUE)
+  mse_per_fold_ffnn[[i]] <- mse
+  
+  cat(paste("Fold", i, "MSE:", mse, "\n"))
+}
+
+
+# Calculate the mean MSE across all folds
+cv_mse_ffnn <- mean(unlist(mse_per_fold_ffnn), na.rm = TRUE)
+cat(paste("\n", "CV MSE (Feedforward Neural Network):", cv_mse_ffnn, "\n"))
+```
+
+### Convolutional neural network
+Now, we use the full (cropped) NDVI images and we let a CNN model extract the relevant features. We then feed those features to a feed forward neural network.
+```{r}
+# Specify the folder path for NDVI files
+ndvi_folder_og <- "./data/ndvi"
+ndvi_folder_crop <- "./data/cropped_ndvi"
+ndvi_folder_resize <- "./data/resize_ndvi"
+
+# List NDVI files
+ndvi_files_og <- list.files(path = ndvi_folder_og, full.names = TRUE)
+ndvi_files_crop <- list.files(path = ndvi_folder_crop, full.names = TRUE)
+ndvi_files_resize <- list.files(path = ndvi_folder_resize, full.names = TRUE)
+```
+
+```{r}
+df_data_scaled$cropped_files <-  ndvi_files_crop
+df_data_scaled$resized_files <- ndvi_files_resize
+
+flux_data_filtered$cropped_files  <-  ndvi_files_crop
+flux_data_filtered$resized_files  <-  ndvi_files_resize
+
+write.csv(flux_data_filtered, file = 'data/flux_data_filtered.csv', row.names = FALSE)
+```
+
+
+#### Image pre-processing
+* Generate a new `data.frame` called `df_data_cnn` that includes 3 rows: `sitename`, `y`, and the location of the corresponding NDVI file, called `ndvi_file`. Make sure that you only store NDVI files which have more than 40% healthy pixels.
+
+- I use the resized images instead of cropped images. 
+```{r}
+df_data_cnn <- na.omit(df_data_scaled)
+dim(df_data_cnn)
+head(df_data_cnn)
+```
+Now, it is time to construct the inputs to the CNN.
+* Create and fill a 3-dimensional array (tensor), with first dimension corresponding to the index of the NDVI file, and second and third dimensions corresponding to the image axes.
+```{r}
+dim(matrix(unlist(readRDS(df_data_cnn$resized_files[1])), nrow = 50, ncol = 50, byrow = TRUE))
+
+```
+
+
+*Hint:* use `cropped_dim` as previously when you computed the summary statistics.
+```{r}
+IMAGE_WIDTH <- 50
+IMAGE_HEIGHT <- 50
+
+ndvi_tensor <- array(NA,dim =c(length(df_data_cnn$resized_files), IMAGE_WIDTH, IMAGE_HEIGHT))
+for(j in 1:length(df_data_cnn$resized_files)){
+  ndvi_tensor[j,,] <- matrix(unlist(readRDS(df_data_cnn$resized_files[j])), nrow = 50, ncol = 50, byrow = TRUE)
+}
+
+```
+
+We kindly provide you with a function `preprocess_images` that scales the values of an NDVI tensor and replaces the `NA` in the rasters by interpolated values.
+```{r}
+IMAGE_CHANNELS <- 1
+IMAGE_SIZE <- c(IMAGE_WIDTH,IMAGE_HEIGHT,IMAGE_CHANNELS)
+
+preprocess_images <- function(ndvi_tensor){
+  
+  min_ndvi <- -10000
+  max_ndvi <- 10000
+  
+  #fill missing values
+  #nd <- apply(ndvi_tensor, c(2,3), function(i) na_interpolation(i))
+  nd <- ndvi_tensor 
+  
+  #rescale to [0,1]
+  nd <- (nd-min_ndvi)/(max_ndvi-min_ndvi)
+  
+  #reshape adding an extra dimension
+  array_reshape(nd, dim = c(-1,IMAGE_SIZE))
+  
+}
+```
+
+* Clean the `ndvi_tensor` with `preprocess_images`
+```{r}
+ndvi_tesor <- preprocess_images(ndvi_tensor)
+dim(ndvi_tensor)
+```
+
+* Plot one of the image, just to make sure that the pre-processing went smoothly.
+```{r}
+image(ndvi_tensor[6,,], main = "NDVI Raster sample", col = terrain.colors(20))
+```
+
+#### Standard fit
+Let's create the CNN.
+
+* Create a function `create_cnn` that returns the CNN model.
+ 
+   - The cnn takes as input a tensor of shape `IMAGE_SIZE`.
+   - It should then be composed of
+   - a CNN layer `layer_conv_2d` with `filters = 4, kernel_size = c(5,5), activation = 'relu', padding = 'same'`
+   - a `batch_layer`
+   - a  max pooling layer `layer_max_pooling_2d` with `pool_size = c(10, 10) `
+   - a FFNN composed of 
+       - 1 input layer
+       - 1 hidden layer with `units = 32, activation = 'relu'`, 
+       - 1 hidden layer with `units = 16, activation = 'relu'`, and
+       - 1 output layer with `units = 1,  activation = 'linear'`.
+
+**Hint: **  you may want to flatten the features after the pool layer.
+
+```{r}
+create_cnn <- function() {
+  
+  # Define the model
+  model <- keras_model_sequential()
+  
+  # Add the CNN layer
+  model %>%
+    layer_conv_2d(filters = 4, kernel_size = c(5, 5), activation = 'relu', padding = 'same', input_shape = c(IMAGE_WIDTH, IMAGE_HEIGHT, 1)) %>%
+    
+    # Add batch normalization
+    layer_batch_normalization() %>%
+    
+    # Add max pooling layer
+    layer_max_pooling_2d(pool_size = c(10, 10)) %>%
+    
+    # Flatten the features
+    layer_flatten() %>%
+    
+    # Add the MLP (Multi-Layer Perceptron)
+    layer_dense(units = 32, activation = 'relu') %>%
+    layer_dense(units = 16, activation = 'relu') %>%
+    layer_dense(units = 1, activation = 'linear')
+  
+  # Compile the model
+  model %>% compile(
+    loss = 'mse',
+    optimizer = optimizer_adam(lr = 0.01)
+  )
+  
+  return(model)
+}
+```
+
+* Create a function `init_cnn` that returns the compiled CNN, with the Adam optimizer and a learning rate `lr=0.01`.
+```{r}
+init_cnn <- function() {
+  
+  # Initialize the CNN
+  cnn_model <- create_cnn()
+  
+  # Define optimizer with specified learning rate
+  opt <- optimizer_adam(lr = 0.01)
+  
+  # Compile the model
+  cnn_model %>% compile(
+    loss = 'mse',
+    optimizer = opt
+  )
+  
+  return(cnn_model)
+}
+```
+
+#### Model architecture
+
+- Similarly to the neural network standard fit, perform a standard fit of the CNN with all the features. Use the same training meta parameters as the neural network.
+  - Plot the training history.
+  - Don't forget to record the training time!
+  - Calculate and store the coefficient of determination R2 
+
+**Hint:** This may take a while.
+
+```{r message=FALSE}
+# Initialize and compile CNN model
+my_cnn_model <- init_cnn()
+
+# Start training time
+start_time <- Sys.time()
+
+# Fit the CNN model
+history_cnn <- my_cnn_model %>% fit(
+  x = ndvi_tensor,
+  y = df_data_cnn$y,
+  epochs = 100,
+  batch_size = 512,
+  validation_split = 0.2,
+  verbose = 2
+)
+
+# End training time
+end_time <- Sys.time()
+
+# Training time
+cnn_training_time <- difftime(end_time, start_time, units = "mins")
+cat("CNN training time:", cnn_training_time, "mins\n")
+
+# Plot the training history
+plot(history_cnn)
+
+# Evaluate R-squared
+pred_cnn <- my_cnn_model %>% predict(ndvi_tensor)
+r2_cnn <- cor(df_data_cnn$y, pred_cnn)^2
+cat("R2 (CNN):", r2_cnn, "\n")
+```
+
+#### Cross validation
+
+The k-fold cross validation procedure involves repeated training of the model considered. Since training the CNN takes a siginificant amout of time, we suggest here to proceed to a [**holdout cross validation**](https://en.wikipedia.org/wiki/Cross-validation_(statistics)#Holdout_method):
+
+"*In the holdout method, we randomly assign data points to two sets d0 and d1, usually called the training set and the test set, respectively. The size of each of the sets is arbitrary although typically the test set is smaller than the training set. We then train (build a model) on d0 and test (evaluate its performance) on d1.*" (source: Wikipedia)
+
+* Perform a hold out cross validation of the CNN, where the training dataset consists of 90% of the data. Compute the cross validation MSE.
+
+**Hint: you may want to use the `sample` function**
+
+```{r, message=FALSE}
+# Set the proportion for training data
+train_proportion <- 0.9
+
+# Generate indices for training and test sets
+indices <- sample(1:length(df_data_cnn$resized_files))
+train_size <- round(length(indices) * train_proportion)
+train_ind <- indices[1:train_size]
+test_ind <- indices[(train_size + 1):length(indices)]
+
+
+# Create training and test tensors
+tensor_train <- array_reshape(ndvi_tensor[train_ind,,], dim=c(-1, IMAGE_WIDTH, IMAGE_HEIGHT, 1))
+tensor_test <- array_reshape(ndvi_tensor[test_ind,,], dim=c(-1, IMAGE_WIDTH, IMAGE_HEIGHT, 1))
+
+
+# Initialize and compile CNN model
+my_cnn_model <- init_cnn()
+
+# Start training time
+start_time <- Sys.time()
+
+# Fit the CNN model on the training data
+history_cnn <- my_cnn_model %>% fit(
+  x = tensor_train,
+  y = df_data_cnn$y[train_ind],
+  epochs = 100,
+  batch_size = 512,
+  validation_split = 0.2,
+  verbose = 2
+)
+
+# End training time
+end_time <- Sys.time()
+
+# Training time
+cnn_training_time <- difftime(end_time, start_time, units = "mins")
+cat("CNN training time:", cnn_training_time, "mins\n")
+
+# Evaluate on the test set
+pred_cnn_test <- my_cnn_model %>% predict(tensor_test)
+
+# Calculate MSE on the test set
+mse_cnn <- mean((df_data_cnn$y[test_ind] - pred_cnn_test)^2)
+cat(paste("CV MSE (CNN):", mse_cnn, "\n"))
+```
+
+### Model selection
+After a lot of coding, time to think!
+
+Summarize the statistics of each model (training time, R2 and CV MSE)
+```{r}
+cat(paste0("Cross validation MSE Score for Linear Regression Model: ", cv_mse_lm))
+cat("\nLM training time", as.numeric(lm_training_time), "mins")
+
+
+cat(paste0("\n \n Cross validation MSE Score for MLP model: ",cv_mse_ffnn))
+cat("\nFFNN training time", ffnn_training_time, "mins")
+
+cat(paste0("\n\nCross validation MSE Score for CNN model: ",mse_cnn))
+cat("\nCNN training time:", cnn_training_time, "mins\n")
+
+```
+* Based upon the previous table, and on criteria of your own, which model would you pick, if you were to create a global GPP map of the entire Earth system from NDVI data? Provide a clear justification.
+- From a trade off perspective it is evident that MLP model performs better that the other both models. I think this comparison based on what is done is not fair. If I concat the NDVI data with the given flux dataset variables and then do the final CNN model, I am not sure by how much these results would vary.
+
+If I were to create a global GPP map, I would go with an lesser loss model, i.e. with low loss, given lack of straight forward model build, it is rather difficult to choose model. Ideally a combination of these models (ensemble) would be a better approach.
+
+* Based upon the previous table, and on criteria of your own, which model would you pick, if you were to better understand how spatial variations in photosynthetic rates relate to GPP? Provide a clear justification.
+I would prefer the CNN and MLP models together, as an ensemble. Using both numerical data (sensor collection data) and the imagery data(where ever the spatial data is available) must yield better results.

@@ -1,0 +1,984 @@
+---
+title: "RK_Application 1 (Week 6): Data Processing (ESDS I)"
+author: "Rohit Koonireddy"
+date: "2023-10-24"
+output: html_document
+---
+```{r message=FALSE, warning=FALSE}
+require(lubridate)
+require(tidyverse)
+require(ncdf4)
+require(viridis)
+require(raster)
+require(rworldmap)
+require(EFDR)
+library(RColorBrewer)
+```
+
+In this application we will work through the topics covered in the first part of the ESDS course, focussing on data set exploration, simple visualisation, application of various functions on the data set, and the use of good coding practices in R. 
+
+# 1. Basic data set investigation in R
+
+*a)* Read in the Carbon Tracker dataset "CT2017.molefrac_glb3x2_2000-01.nc", which is a gridded data set of mean monthly carbon dioxide mixing ratio for January 2000 produced by NOAA's Carbon Tracker program. For more information about Carbon Tracker, see the website: https://gml.noaa.gov/ccgg/carbontracker/.
+
+```{r}
+# Add code here
+carbon_tracker_nc = nc_open('data/CT2017.molefrac_glb3x2_2000-01.nc')
+```
+
+*b)* What variables (and what are their units) and dimensions (and what size are they) are present in this data set?
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# run this command to see the summary
+print(carbon_tracker_nc)
+```
+**Variables**: *add vars*
+There are 12 variables [with their dimensions in the square brackets] in the ncdata file given, : 
+ 1. air_mass[longitude,latitude,level,time]
+ 2. blh[longitude,latitude,time]
+ 3. co2[longitude,latitude,level,time] -  _FillValue: -9.99999979021477e+33
+ 4. decimal_date[time] - _FillValue: -1e+34 
+ 5. gph[longitude,latitude,boundary,time] _FillValue: -9.99999979021477e+33
+ 6. orography[longitude,latitude]
+ 7. pressure[longitude,latitude,boundary,time] _FillValue: -9.99999979021477e+33
+ 8. specific_humidity[longitude,latitude,level,time]
+ 9. temperature[longitude,latitude,level,time]
+ 10.time_components[calendar_components,time]
+ 11.u[longitude,latitude,level,time]
+ 12.v[longitude,latitude,level,time]
+
+**Dimensions**: *add dimensions*
+There are 6 dimensions and the size of each is given here 
+ 1. time  Size:1
+ 2. level  Size:25 
+ 3. latitude  Size:90
+ 4. longitude  Size:120
+ 5. boundary  Size:26
+ 6. calendar_components  Size:6
+ 
+
+*c)* Save longitude, latitude, decimal_date and co2 as vectors/matrices.
+```{r}
+lon <- ncvar_get(carbon_tracker_nc, "longitude")
+lat <- ncvar_get(carbon_tracker_nc, "latitude")
+dec_data <- ncvar_get(carbon_tracker_nc, "decimal_date")
+co2_data <- ncvar_get(carbon_tracker_nc, "co2")
+level <- ncvar_get(carbon_tracker_nc, "level")
+```
+
+* Get the fill value for CO2 and use it to replace missing values with NaN. 
+```{r}
+# Add code here 
+fillvalue_co2 <- ncatt_get(carbon_tracker_nc, "co2", "_FillValue", verbose="F")
+print(paste0("Fill value for co2:",fillvalue_co2))
+#no missing values but still I create a replace statement
+co2[co2==fillvalue_co2$value] = NaN
+```
+
+* If needed, convert units of longitude and latitude to degrees. 
+I do not convert them into degrees as they are already in degrees.
+
+* Close the nc file and combine all the variables to a list.
+```{r}
+co2_list = list(lat=lat,lon=lon,decimal_date=dec_data,level = level, co2=co2_data)
+nc_close(carbon_tracker_nc)
+```
+
+*d)* Make two figures, one showing a global map of CO2 at the surface level, and one showing CO2 at the highest atmospheric level available in this dataset. 
+
+
+* Make sure the plots show continental outlines and have titles.
+
+* You can convert to a raster like we did in an earlier exercise or use other plotting methods you find online.
+
+* If you can, create a function to transform and plot the data and add the continental outlines. Then you can use this function on the two atmospheric levels efficiently.
+```{r message=FALSE, warning=FALSE}
+library(sf)
+library(raster)
+
+
+# Add code here
+plot_map = function(lon, lat, data, local_level = NULL, ylim = c(-90, 90), xlim = c(-180, 180), cmap = rev(brewer.pal(10, "RdBu")), title = "Plot") {
+  if (is.null(local_level) || local_level == "HIGH") {
+    #print("Choosing the highest level")
+    local_level <- max(data$level)
+    data <- data$co2[, , local_level]
+    title = paste("Plot for highest level: ", local_level)
+  } else if (local_level == "LOW") {
+    #print("Choosing the lowest level")
+    local_level <- min(data$level)
+    data <- data$co2[, , local_level]
+    title = paste("Plot for low/surface level: ", local_level)
+  } else {
+    print("Invalid local_level. Choose either 'HIGH' or 'LOW'.")
+  }
+  
+  r = raster(t(data), xmn = min(lon), xmx = max(lon), ymn = min(lat), ymx = max(lat), crs = CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs +towgs84=0,0,0"))
+  r = flip(r, direction = 'y')
+  plot(r, ylim = ylim, xlim = xlim, main = title, col = cmap)
+  plot(coastsCoarse, add = TRUE, col = 'black')
+}
+
+# Call the plot_map function with local_level explicitly set to "HIGH" or "LOW" or leave it as NULL
+par(mar = c(2, 4, 1, 1))  # set plotting margins
+par(mfrow=c(2,1))
+plot_map(co2_list$lon, co2_list$lat, data = co2_list, local_level = "HIGH")  # Set local_level as "HIGH" or "LOW" here
+plot_map(co2_list$lon, co2_list$lat, data = co2_list, local_level = "LOW")  # Set local_level as "HIGH" or "LOW" here
+
+```
+
+```{r}
+#plot including continent lines
+#download world_continents.shp file from ARCGIS
+
+# Load the world coastlines shapefile
+continent_data <- st_read("data/World_Continents.shp")
+
+plot_map <- function(lon, lat, data, local_level = NULL, ylim = c(-90, 90), xlim = c(-180, 180), cmap = rev(brewer.pal(10, "RdBu")), title = "Plot") {
+  if (is.null(local_level) || local_level == "HIGH") {
+    print("Choosing the highest level")
+    local_level <- max(data$level)
+    data <- data$co2[, , local_level]
+    title = paste("Plot for highest level: ", local_level)
+  } else if (local_level == "SURFACE") {
+    print("Choosing the SURFACE level")
+    local_level <- min(data$level)
+    data <- data$co2[, , local_level]
+    title = paste("Plot for low/surface level: ", local_level)
+  } else {
+    print("Invalid local_level. Choose either 'HIGH' or 'SURFACE'.")
+  }
+  
+   r = raster(t(data), xmn = min(lon), xmx = max(lon), ymn = min(lat), ymx = max(lat), crs = CRS("+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs +towgs84=0,0,0"))
+  r = flip(r, direction = 'y')
+  r_df <- as.data.frame(r, xy = TRUE)
+  
+ggplot(data = r_df) +
+  geom_raster(aes(x = x, y = y, fill = layer)) +
+  scale_fill_viridis(option = "magma", name = "CO2 Levels") +
+  geom_sf(data = continent_data, fill = NA, color = "black") +
+  labs(title = title) +
+  theme_minimal()
+}
+
+# Call the plot_map function with local_level explicitly set to "HIGH" or "LOW" or leave it as NULL
+par(mar = c(2, 4, 1, 1))  # set plotting margins
+par(mfrow = c(2, 1))
+plot_map(co2_list$lon, co2_list$lat, data = co2_list, local_level = "HIGH")
+plot_map(co2_list$lon, co2_list$lat, data = co2_list, local_level = "SURFACE")
+
+```
+
+# 2. Exploratory statistics
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+require(lubridate)
+require(tidyverse)
+require(purrr)
+require(raster)
+require(ncdf4)
+require(rworldmap)
+require(viridis)
+```
+
+*a)* Write a function to summarise CO2 in a certain layer according to latitude band. 
+
+* The function should output a dataframe, with rows corresponding to each latitude band and columns to different variables.
+
+* The dataframe should have variables min_lat and max_lat, which show the latitude range of the band, as well as mean, median, mode and standard deviation of CO2 in the band. 
+
+* You should provide the function with data from a certain layer, the latitude vector or matrix, and the desired latitude binning band width (this is the function input).
+
+* The latitude band width should be an optional input, with a default that latitude bands should be 10 degrees wide, eg. -90 to -80, -80 to -70, and so on. 
+
+* You will also need to write an extra function to calculate the mode. You will need to discretise the continuous data to be able to find a mode. How many decimal places seems appropriate to discretise the CO2 data?
+
+*Extra info:*
+
+The function should look like: 
+
+```{r}
+summarise_co2_by_lat = function(data,lat,...){
+  #FUNCTION BODY 
+}
+```
+An example of the output:
+
+min_lat max_lat     mean   median  mode      stdev \
+1      -90     -80 366.3560 366.3762 366.4 0.04223515 \
+2      -80     -70 366.3108 366.3052 366.4 0.07199042 \
+3      -70     -60 366.1750 366.1820 366.2 0.11213171 \
+...
+
+```{r message=FALSE, warning=FALSE}
+# Function to calculate mode of a numeric vector
+calculate_mode <- function(x, digits = 2) {
+  x_rounded <- round(x, digits = digits)
+  unique_x <- unique(x_rounded)
+  tab <- table(x_rounded)
+  mode_values <- unique_x[tab == max(tab)]
+  return(mode_values)
+}
+
+# Function to summarize CO2 data by latitude bands
+summarise_co2_by_lat <- function(data, lat, lat_band_width = 10, local_level= NULL) {
+  # Create latitude bands
+  min_lat <- seq(-90, 90 - lat_band_width, by = lat_band_width)
+  max_lat <- min_lat + lat_band_width
+  
+  # Initialize empty vectors to store summary statistics
+  mean_values <- vector("numeric", length(min_lat))
+  median_values <- vector("numeric", length(min_lat))
+  mode_values <- vector("numeric", length(min_lat))
+  stdev_values <- vector("numeric", length(min_lat))
+  
+  # Loop through latitude bands and calculate statistics
+  for (i in 1:length(min_lat)) {
+    mask <- lat >= min_lat[i] & lat < max_lat[i]
+    mask <- as.logical(mask)
+    if (is.null(local_level)){
+      co2_values <- data[,mask,]
+    }else if (local_level== "HIGH"){
+      co2_values <- data[,mask,25]
+    }else if (local_level == "SURFACE"){
+      co2_values <- data[,mask,1]
+    }else{
+      print("Make sure you are entering SURFACE or NULL")
+    }
+    
+    mean_values[i] <- mean(co2_values)
+    median_values[i] <- median(co2_values)
+    mode_values[i] <- calculate_mode(co2_values)
+    stdev_values[i] <- sd(co2_values)
+  }
+  
+  # Create a dataframe with the summary
+  summary_df <- data.frame(
+    min_lat = min_lat,
+    max_lat = max_lat,
+    mean = mean_values,
+    median = median_values,
+    mode = mode_values,
+    stdev = stdev_values
+  )
+  
+  return(summary_df)
+}
+
+# Example usage
+# Replace co2_data and lat_data with your data
+# The default latitude band width is 10 degrees
+result <- summarise_co2_by_lat(co2_list$co2, co2_list$lat, lat_band_width = 10)
+
+# Print the result
+print(result)
+
+```
+*b)* Run your function to summarise CO2 by latitude band for the surface and the uppermost layers (the layers you plotted earlier).
+
+```{r message=FALSE, warning=FALSE}
+# Add code here 
+#print("For upper most level:")
+upper_lat_co2 <- summarise_co2_by_lat(co2_list$co2, co2_list$lat, lat_band_width = 10, local_level = "HIGH")
+
+#print("For surface level:")
+surface_lat_co2 <- summarise_co2_by_lat(co2_list$co2, co2_list$lat, lat_band_width = 10, local_level = "SURFACE")
+```
+
+*c)* Plot CO2 against latitude for the upper and surface layers, using the mean CO2 per latitude band.
+
+* You saved the min and max lat of each band so you'll need to find the mid-point of each band for plotting the latitude.
+
+* Show the standard deviation in each latitude band shown with error bars. *Hint*: there is no built in error bars in base R plotting but you can use the arrows() function to make them, there are examples on google. Alternatively, use ggplot.
+
+* Use a different colour to distinguish surface and upper layers and include them in different subplots. 
+
+* In different line styles, show also the median and mode. 
+
+* Include a legend and whatever else is needed to make your figure easy to understand.
+
+```{r fig.dim = c(6,8)}
+# Load necessary libraries if not already loaded
+library(ggplot2)
+
+# Plot for the uppermost level
+ggplot(upper_lat_co2, aes(x = (min_lat + max_lat) / 2, y = mean, ymin = mean - stdev, ymax = mean + stdev)) +
+  geom_errorbar(width = 0.1) +
+  geom_line(aes(y = median, linetype = "Median"), color = "blue") +
+  geom_line(aes(y = mode, linetype = "Mode"), color = "green") +
+  geom_point() +
+  labs(title = "CO2 vs. Latitude (Uppermost Level)", x = "Latitude", y = "CO2") +
+  scale_color_manual(values = c("Mean" = "black")) +
+  scale_linetype_manual(values = c("Mean" = "solid", "Median" = "dashed", "Mode" = "dotted")) +
+  theme_minimal() +
+  theme(legend.title = element_blank()) +
+  theme(legend.position = "top")
+
+# Plot for the surface level
+ggplot(surface_lat_co2, aes(x = (min_lat + max_lat) / 2, y = mean, ymin = mean - stdev, ymax = mean + stdev)) +
+  geom_errorbar(width = 0.1) +
+  geom_line(aes(y = median, linetype = "Median"), color = "blue") +
+  geom_line(aes(y = mode, linetype = "Mode"), color = "green") +
+  geom_point() +
+  labs(title = "CO2 vs. Latitude (Surface Level)", x = "Latitude", y = "CO2") +
+  scale_color_manual(values = c("Mean" = "black")) +
+  scale_linetype_manual(values = c("Mean" = "solid", "Median" = "dashed", "Mode" = "dotted")) +
+  theme_minimal() +
+  theme(legend.title = element_blank()) +
+  theme(legend.position = "top")
+```
+
+*d)* What do you observe from this figure and from the maps in the previous step?
+
+*Observations*
+From the figure showing CO2 levels against latitude for both the uppermost and surface levels, and the maps created in the previous step, we can make the following observations:
+
+CO2 Variation: In the uppermost level, we can see a significant variation in CO2 levels as latitude changes. In general, CO2 levels appear to be lower at higher latitudes and increase as we move towards the equator. This pattern is consistent with our understanding of atmospheric circulation and CO2 distribution.
+
+Uppermost vs. Surface Levels: Comparing the two subplots, we can observe that the uppermost level generally has lower CO2 levels than the surface level. This difference may be attributed to the vertical distribution of CO2 in the atmosphere, with higher concentrations at the surface.
+
+Consistency: In general, the CO2 levels appear more consistent and less variable in the surface level compared to the uppermost level, as indicated by the narrower error bars.
+
+Influence of Latitude: The variation of CO2 with latitude highlights the influence of geographical location on CO2 concentrations. This observation is consistent with the fact that CO2 levels can vary due to factors such as proximity to emission sources, atmospheric circulation patterns, and seasonal changes.
+# 3. Downscaling
+
+*a)* Read in the CO2 timeseries from Mauna Loa that we used in the first tutorial: "co2_mlo_surface-insitu_2_3001-9999_daily.txt"
+
+* Make sure all missing or invalid values are represented as NaNs.
+
+```{r}
+# Add code here 
+importdata <- function(station) {
+  # Get the data
+  file = paste0("data/co2_",station,"_surface-insitu_2_3001-9999_daily.txt")
+  data = read.delim(file,sep = " ", comment.char = '#')
+  # Fix timestamp
+  date = paste(data$year,data$month,data$day,sep="-")
+  time = paste(data$hour,data$minute,data$second,sep=":")
+  data$dt = ymd_hms(paste(date,time,sep=" "))
+  # Replace missing with NaN
+  data$value[data$value<0] = NaN
+  # Find annual means
+  ann_means = aggregate(data$value, list(data$year), FUN=mean, na.rm=TRUE) 
+  colnames(ann_means) = c("year","value")
+  # Detrend
+  data$value_detrended = data$value*NaN # create space for detrended data
+  for (n in seq_along(ann_means$year)){ # Use a while loop to run through all the years
+    tmp = data$year==ann_means$year[n]
+    data$value_detrended[tmp] = data$value[tmp] - ann_means$value[n] 
+  }
+  # Create a list with our outputs
+  result = list(data=data,ann_means=ann_means)
+  return(result)
+}
+# This function outputs a list containing the data and the annual means for the desired station
+mlo = importdata("mlo")
+```
+
+*b)* In the Data folder, there are 6 Carbon Tracker data files (including the one we already used). Open each CT data file and find the CO2 value for the grid cell closest to Mauna Loa, for each of the first 20 levels. 
+
+* The longitude and latitude for Mauna Loa are in the mlo data file header. 
+
+* Save the 6 x 20 CO2 values (6 files/dates x 20 levels) and the 6 dates (decimal year) in a data frame. 
+
+To help you we provided the following code that you need to complete:
+```{r }
+# Define the latitude and longitude of Mauna Loa
+mlo_latlon = c(19.536, -155.576)
+
+# Find all CT2017 files in the "data" directory
+files <- list.files("data", pattern = "CT2017.molefrac")
+
+# Create an empty dataframe to store the results
+ct_mlo <- data.frame(matrix(nrow = length(files), ncol = 26))
+colnames(ct_mlo) <- c("date", paste0("co2_", 1:25))
+
+# Loop through each of the files
+for (n in seq_along(files)) {
+  # Open the NetCDF file
+  nc_data <- nc_open(paste0("data/", files[n]))
+  
+  # Extract the date (decimal year) from the file
+  ct_mlo$date[n] <- ncvar_get(nc_data, "decimal_date")
+  
+  # Get latitude and longitude variables
+  lat <- ncvar_get(nc_data, "latitude")
+  lon <- ncvar_get(nc_data, "longitude")
+  
+  # Find the index of the closest grid cell to Mauna Loa
+  lat_index <- which.min(abs(lat - mlo_latlon[1]))
+  lon_index <- which.min(abs(lon - mlo_latlon[2]))
+  
+  # Extract CO2 values for the first 20 levels
+  co2 <- ncvar_get(nc_data, "co2")
+  ct_mlo[n, paste0("co2_", 1:25)] <- co2[lon_index, lat_index, 1:25]
+  
+  # Close the NetCDF file
+  nc_close(nc_data)
+}
+
+library(lubridate)
+
+decimal_to_formatted_date <- function(decimal_date) {
+  year <- as.integer(decimal_date)
+  day_of_year <- as.integer((decimal_date - year) * 365)  # Assuming a non-leap year
+  date_in_date_format <- as.Date(paste(year, day_of_year), format = "%Y %j")
+  date_in_formatted_format <- format(date_in_date_format, format = "%Y-%m-%d")
+  return(date_in_formatted_format)
+}
+
+#convert the date 
+ct_mlo$date <- sapply(ct_mlo$date, decimal_to_formatted_date)
+ct_mlo$date <- as.POSIXct(ct_mlo$date, format = "%Y-%m-%d")
+
+print(head(ct_mlo))
+```
+
+
+```{r}
+mlo_df <- data.frame(mlo[1])
+mlo_df <- mlo_df[c("data.site_gaw_id","data.dt","data.value","data.value_unc","data.latitude","data.longitude","data.altitude","data.elevation","data.intake_height")]
+print(head(mlo_df))
+
+mlo_df_2 <- data.frame(mlo[2])
+print(head(mlo_df_2))
+```
+*c)* The Carbon Tracker data are monthly means, so we need monthly means at MLO to compare. Find the mean and standard deviation of CO2 at Mauna Loa for the 6 months corresponding to the Carbon Tracker data points.
+
+```{r}
+# Add code here 
+# Extract the CO2 columns corresponding to the 6 months (adjust column names as needed)
+co2_cols <- paste0("co2_", 1:25)
+
+# Calculate the mean and standard deviation for each CO2 column
+mean_values <- sapply(ct_mlo[, co2_cols], mean, na.rm = TRUE)
+std_dev_values <- sapply(ct_mlo[, co2_cols], sd, na.rm = TRUE)
+
+# Print the results
+cat("Mean CO2 values for the 6 months:\n")
+print(mean_values)
+
+cat("Standard Deviation of CO2 values for the 6 months:\n")
+print(std_dev_values)
+```
+*d)* Write a function to find RMSE, slope and correlation coefficient when comparing the 6 date values for the MLO station with the 6 date values from a single level of Carbon tracker. 
+
+* Test the function on the data from the first level of the CT data.
+
+* *Hint:* Find an equation for RMSE online. For the slope and correlation coefficient (R2), you can fit the CT and MLO data with the lm() function.
+
+```{r}
+mlo_dates_char <- as.character(mlo_df$data.dt)
+ct_dates_char <- as.character(ct_mlo$date)
+
+# Compare the character strings
+comparison_result <- mlo_dates_char %in% ct_dates_char
+
+# Count the number of matches and mismatches
+matches <- sum(comparison_result)
+mismatches <- sum(!comparison_result)
+
+# Print the counts
+cat("Number of matching dates:", matches, "\n")
+cat("Number of mismatched dates:", mismatches, "\n")
+```
+```{r}
+# Add code here 
+compare_MLO_CT <- function(MLO_data, CT_data, level) {
+  # Select the relevant columns from MLO and CT data
+  MLO_data <- MLO_data[as.character(MLO_data$data.dt) %in% as.character(CT_data$date), ]
+  MLO_values <- MLO_data$data.value
+  CT_values <- CT_data[, level]
+  
+  # Remove rows with missing values
+  complete_cases <- complete.cases(MLO_values, CT_values)
+  MLO_values <- MLO_values[complete_cases]
+  CT_values <- CT_values[complete_cases]
+  
+  # Calculate RMSE
+  rmse <- sqrt(mean((MLO_values - CT_values)^2))
+  
+  # Fit linear regression
+  lm_model <- lm(MLO_values ~ CT_values)
+  
+  # Extract slope and correlation coefficient (R-squared)
+  slope <- coef(lm_model)[2]
+  r_squared <- summary(lm_model)$r.squared
+  
+  # Create a dataframe to store the results
+  result <- data.frame(RMSE = rmse, Slope = slope, R_squared = r_squared)
+  
+  return(result)
+}
+
+# Test the function on the data from the first level of the CT data
+level_to_test <- "co2_1"  # Replace with another level
+result <- compare_MLO_CT(mlo_df, ct_mlo, level_to_test)
+print(result)
+```
+
+*e)* Use an apply or purrr function to find the RMSE, slope and correlation coefficient (R2) between the Mauna Loa data points and each of the 20 Carbon Tracker levels we have considered. 
+
+* Use the function you made in the previous step.
+
+* If you cannot manage this with apply or purrr, use a loop or a simpler method.
+
+```{r}
+# Add code here
+# Define a vector of level names (e.g., "co2_1", "co2_2", ..., "co2_20")
+level_names <- paste0("co2_", 1:25)
+
+# Apply the compare_MLO_CT function to each level using lapply
+results_list <- lapply(level_names, function(level) {
+  result <- compare_MLO_CT(mlo_df, ct_mlo, level)
+  return(result)
+})
+
+# Convert the list of results into a data frame
+results_df <- do.call(rbind, results_list)
+
+# Add a column for level names
+results_df$Level <- paste0(1:25)
+
+# Print the results
+print(results_df)
+```
+
+*f)* Make a figure with three subplots showing the rmse, slope and r2 of the comparison between the 20 Carbon Tracker levels and the Mauna Loa data. 
+
+* Use the plot to determine which CT atmospheric level fits the MLO station data best. Why?
+
+```{r fig.dim = c(6,8)}
+# Add code here 
+library(ggplot2)
+
+# Create separate plots for RMSE, Slope, and R-squared
+p1 <- ggplot(results_df, aes(x = Level, y = RMSE)) +
+  geom_bar(stat = "identity", fill = "blue", width = 0.7) +
+  labs(title = "RMSE vs. CT Atmospheric Level", x = "Level", y = "RMSE")
+
+p2 <- ggplot(results_df, aes(x = Level, y = Slope)) +
+  geom_bar(stat = "identity", fill = "green", width = 0.7) +
+  labs(title = "Slope vs. CT Atmospheric Level", x = "Level", y = "Slope")
+
+p3 <- ggplot(results_df, aes(x = Level, y = R_squared)) +
+  geom_bar(stat = "identity", fill = "red", width = 0.7) +
+  labs(title = "R-squared vs. CT Atmospheric Level", x = "Level", y = "R-squared")
+
+# Display the plots
+print(p1)
+print(p2)
+print(p3)
+```
+If we look at the RMSE graph, it is evident that the LM fits from the first 19 levels very well, where RMSE values are very low. From levels 21 though 25 RMSE values are higher indicating lesser fit.
+
+*Which level(s) matches best?*
+
+*g)* The Carbon Tracker variable "geopotential height" gives the level height boundaries in each run of the model that generated the data. 
+
+* There are 25 levels, but gph has 26 values, because it contains boundaries between the levels. 
+
+* Find the mean geopotential height (average of upper and lower boundaries) for the MLO grid cell for the first 20 levels for each of the 6 dates and save as a data frame. You can reuse and adapt the code that you used to retrieve CO2 for each grid cell/date.
+
+To help you we provided the following code that you need to complete:
+```{r,eval=FALSE}
+ct_mlo_gph <- data.frame(matrix(nrow = length(files), ncol = 21))  # Create space for results
+colnames(ct_mlo_gph) <- c("date", paste0("gph_", 1:20))
+
+for (n in seq_along(files)) {  # Loop through each of the files
+  nc_data <- nc_open(paste0("data/", files[n]))
+  ct_mlo_gph$date[n] <- ncvar_get(nc_data, "decimal_date")
+
+  lat <- ncvar_get(nc_data, "latitude")  # get the latitude variable of a netcdf file
+  lon <- ncvar_get(nc_data, "longitude")  # get the longitude variable of a netcdf file
+
+  lat <- which.min(abs(lat - mlo_latlon[1]))
+  lon <- which.min(abs(lon - mlo_latlon[2]))
+
+  gph <- ncvar_get(nc_data, "gph")  # Get geopotential height data
+  ct_mlo_gph[n, paste0("gph_", 1:20)] <- (gph[lon, lat, 1:20] + gph[lon, lat, 2:21]) / 2
+  nc_close(nc_data)
+}
+print(ct_mlo_gph)
+
+```
+
+*h)* What are the heights of the layers which best matched the Mauna Loa data? Which layer is closest to the actual height of Mauna Loa observatory (see the metadata in the file)? What does this tell you about the veracity and representativeness of each data type?
+
+*Observations*
+The height of layers up to approximately 20,000 feet or 6,000 meters appears to be predicted quite accurately in the Carbon Tracker data. Beyond this point, the accuracy of the predictions starts to diminish significantly. Changes in geopotential height beyond this altitude do not align well with the actual conditions observed at the Mauna Loa observatory.
+
+The decreasing accuracy of predictions at higher altitudes may be due to various factors, including the complexity of the atmosphere at extreme altitudes, variations in local climate patterns, and the limitations of the atmospheric models used to generate the Carbon Tracker data. The presence of additional factors such as stratospheric dynamics, ozone concentration, and other atmospheric phenomena can introduce greater uncertainty into the predictions.
+
+This insight highlights the importance of considering the altitude range when assessing the veracity and representativeness of the Carbon Tracker data. For understanding atmospheric conditions near the surface and within the troposphere, the data appears to be a good representation. However, when studying the upper atmosphere or the stratosphere, one should exercise caution and consider potential limitations in the data's accuracy.
+
+# 4. Fluxes and growth
+
+*a)* The Carbon Tracker project does not just produce CO2 mixing ratio data for different levels, but also estimates of the CO2 flux from each grid cell. Read in the Carbon Tracker flux data (CT2017.flux1x1-monthly.nc): What variables and dimensions does this dataset have in comparison to the mixing ratio data?
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# Add code here 
+carbon_flux_nc = nc_open('data/CT2017.flux1x1-monthly.nc')
+print(carbon_flux_nc)
+```
+
+*What does the file contain?*
+variables and dimension in the square brackets as shown below:
+1. decimal_time[time]   units: years
+2. bio_flux_opt[longitude,latitude,time] units: mol m-2 s-1   _FillValue: -1e+34
+3. ocn_flux_opt[longitude,latitude,time] units: mol m-2 s-1  _FillValue: -1e+34
+4. fossil_flux_imp[longitude,latitude,time] units: mol m-2 s-1 _FillValue: -1e+34
+5. fire_flux_imp[longitude,latitude,time] units: mol m-2 s-1  _FillValue: -1e+34
+
+
+*b)* Find the total global flux for each timestep for the four different components (bio, ocn, fossil, fire). 
+-> I did a mistake on calculating years data while summation by time. I did by month corresponding to each time period mentioned in the data.
+
+* Put this in a data frame with columns: time, bio, ocn, fossil, fire, and then sum the four columns to add a "total" flux column.
+
+* To find the global flux, you will need to multiply the flux in each grid cell (mol m-2 s-1) by the area of the grid cell in m2, to get the flux for a grid cell in mol s-1. You can then sum all the grid cell fluxes to find the total global flux in mol s-1. 
+
+* To do this, you will need to find the areas of each the grid cells: Convert any of the datasets from the flux file to a raster (r) using the lon and lat in the flux file (like we have done for plotting before), and use the area(r) function (from the raster package) to find grid cell areas as a raster. The area of each grid cell will be in km2, so you need to convert to m2.
+
+* The global flux is not usually reported in mol s-1, but in Pg-C y-1. Convert moles to Pg (10^15 grams) based on the mass of carbon (12.011 g mol-1), and convert from s-1 to y-1, so that your global fluxes are in Pg-C y-1.
+
+```{r}
+# Add code here 
+#function to convert lat and long into square metres
+degrees_to_m2 <- function(latitude, longitude) {
+  earth_radius <- 6371000  # Approximately 6,371 km
+  latitude_rad <- latitude * (pi / 180)
+  longitude_rad <- longitude * (pi / 180)
+  size_one_degree_latitude_meters <- earth_radius * (pi / 180)
+  size_one_degree_longitude_meters <- earth_radius * cos(latitude_rad) * (pi / 180)
+  product_size_m2 <- size_one_degree_latitude_meters * size_one_degree_longitude_meters
+  return(product_size_m2)
+}
+
+# convert to Pg
+convert_to_Pg_C_per_year <- function(flux_mol_per_s) {
+  grams_per_mol <- 12.011  # Mass of carbon in grams per mole
+  seconds_per_year <- 365.25 * 24 * 60 * 60  # Number of seconds in a year
+  flux_Pg_C_per_year <- (flux_mol_per_s * grams_per_mol)* seconds_per_year / (1e15 )
+  return(flux_Pg_C_per_year)
+}
+
+lon <- ncvar_get(carbon_flux_nc, "longitude")
+lat <- ncvar_get(carbon_flux_nc, "latitude")
+dec_data <- ncvar_get(carbon_flux_nc, "decimal_time")
+bio_flux <- ncvar_get(carbon_flux_nc, "bio_flux_opt")
+ocn_flux <- ncvar_get(carbon_flux_nc, "ocn_flux_opt")
+fossil_flux <- ncvar_get(carbon_flux_nc, "fossil_flux_imp")
+fire_flux <- ncvar_get(carbon_flux_nc, "fire_flux_imp")
+
+#replace fill values
+fillvalue_bio <- ncatt_get(carbon_flux_nc, "bio_flux_opt", "_FillValue", verbose="F")
+bio_flux[bio_flux==fillvalue_bio$value] = NaN
+fillvalue_ocn <- ncatt_get(carbon_flux_nc, "ocn_flux_opt", "_FillValue", verbose="F")
+ocn_flux[ocn_flux==fillvalue_ocn$value] = NaN
+fillvalue_fossil <- ncatt_get(carbon_flux_nc, "fossil_flux_imp", "_FillValue", verbose="F")
+fossil_flux[fossil_flux==fillvalue_fossil$value] = NaN
+fillvalue_fire <- ncatt_get(carbon_flux_nc, "fire_flux_imp", "_FillValue", verbose="F")
+fire_flux[fire_flux==fillvalue_fire$value] = NaN
+
+flux_list <- list(lon, lat, dec_data, bio_flux, ocn_flux, fossil_flux,fire_flux )
+nc_close(carbon_flux_nc)
+```
+
+
+```{r}
+#print dimensions for each
+print(paste0("longitude dimension: ",dim(lon)))
+print(paste0("latitude dimension: ",dim(lat)))
+print(paste0("dec_data dimensions: ",dim(dec_data)))
+print("bio_flux dimensions: ")
+print(dim(bio_flux))
+print("ocn_flux dimensions: ")
+print(dim(ocn_flux))
+print("fossil_flux dimensions: ")
+print(dim(fossil_flux))
+print("fire_flux dimensions: ")
+print(dim(fire_flux))
+```
+* To allow you to check your data processing and unit conversions, the results in Pg-C y-1 should be: 
+
+time           bio        ocn    fossil      fire       total \
+1   2000.042   3.457076037 -2.3541363  7.157679 2.2500390  10.5106573 \
+2   2000.124   0.137743236 -1.1642693  7.078576 1.6185597   7.6706094 \
+3   2000.206  -0.817252134 -2.9849865  6.847836 1.2632383   4.3088354 \
+4   2000.290   3.356211256 -1.2039177  6.511862 1.1410791   9.8052345 \
+...
+```{r}
+convert_to_final_flux_sum <- function(lon_local,lat_local, data_local, date_data) {
+  for (i in 1:length(lon_local)) {
+    for (j in 1:length(lat_local)) {
+      lat_1 <- lat_local[i]
+      lon_1 <- lon_local[j]
+      m2 <- degrees_to_m2(lat_1, lon_1)
+      data_local[i, j, ] <- data_local[i, j, ] * m2
+    }
+  }
+  summed_data <- apply(data_local, MARGIN = 3, FUN = function(x) sum(x, na.rm = TRUE))
+  summed_data <- convert_to_Pg_C_per_year(summed_data)
+
+  return(summed_data)
+}
+
+convert_to_final_flux_mean <- function(lon_local,lat_local, data_local, date_data) {
+  for (i in 1:length(lon_local)) {
+    for (j in 1:length(lat_local)) {
+      lat_1 <- lat_local[i]
+      lon_1 <- lon_local[j]
+      m2 <- degrees_to_m2(lat_1, lon_1)
+      data_local[i, j, ] <- data_local[i, j, ] * m2
+    }
+  }
+  mean_data <- apply(data_local, MARGIN = 3, FUN = function(x) mean(x, na.rm = TRUE))
+  mean_data <- convert_to_Pg_C_per_year(mean_data)
+
+  return(mean_data)
+}
+
+bio <- convert_to_final_flux_sum(flux_list[[1]],flux_list[[2]],flux_list[[4]],flux_list[[3]])
+ocn <- convert_to_final_flux_sum(flux_list[[1]],flux_list[[2]],flux_list[[5]],flux_list[[3]])
+fossil <- convert_to_final_flux_sum(flux_list[[1]],flux_list[[2]],flux_list[[6]],flux_list[[3]]) 
+fire <- convert_to_final_flux_sum(flux_list[[1]],flux_list[[2]],flux_list[[7]],flux_list[[3]])
+sum_flux <- bio+ocn+fossil+fire
+
+column_names <- c("time","bio","ocn","fossil","fire","total")
+sum_flux_df <- data.frame(time= flux_list[[3]],bio= bio,ocn,fossil= fossil,fire=fire,total=sum_flux )
+print(sum_flux_df)
+```
+
+*c)* Create a second dataframe with the same format, but including the annual mean fluxes. 
+
+* Discretise the decimal dates from the previous step to integers and then aggregate all months from each year.
+
+* Although the previous fluxes are monthly means, they are in units of Pg y-1, so you average the monthly fluxes rather than summing them to find the annual mean fluxes. You do not need to account for different months being different lengths.
+
+* The results should look like: 
+
+   time       bio       ocn   fossil     fire    total \
+1  2000 -4.465729 -1.703678 6.658242 1.919014 2.407848 \
+2  2001 -3.191520 -1.885047 6.838121 1.941393 3.702947 \
+3  2002 -2.496992 -1.568957 6.939095 2.001848 4.874994 \
+
+```{r}
+# Add code here 
+bio <- convert_to_final_flux_mean(flux_list[[1]],flux_list[[2]],flux_list[[4]],flux_list[[3]])
+ocn <- convert_to_final_flux_mean(flux_list[[1]],flux_list[[2]],flux_list[[5]],flux_list[[3]])
+fossil <- convert_to_final_flux_mean(flux_list[[1]],flux_list[[2]],flux_list[[6]],flux_list[[3]]) 
+fire <- convert_to_final_flux_mean(flux_list[[1]],flux_list[[2]],flux_list[[7]],flux_list[[3]])
+sum_flux <- bio+ocn+fossil+fire
+
+column_names <- c("time","bio","ocn","fossil","fire","total")
+mean_flux_df <- data.frame(time= flux_list[[3]],bio= bio,ocn,fossil= fossil,fire=fire,total=sum_flux )
+print(mean_flux_df)
+```
+
+*d)* Make a plot with two subplots showing the four flux components (use four colours) and the total fluxes (black, thicker line). 
+
+* The upper plot should show monthly fluxes and the lower plot annual fluxes. 
+
+* Include a legend, axes labels, and anything else needed to make your figure easy to understand. 
+
+```{r fig.dim = c(6,8)}
+# Add code here 
+# Monthly Fluxes
+data <- sum_flux_df
+# Plot the four flux components with different colors
+plot(data$time, data$bio, type = "l", col = "red", xlab = "Time", ylab = "Flux", main = "Monthly Fluxes", ylim = c(min(data$bio, data$ocn, data$fossil, data$fire), max(data$bio, data$ocn, data$fossil, data$fire)))
+lines(data$time, data$ocn, col = "blue")
+lines(data$time, data$fossil, col = "green")
+lines(data$time, data$fire, col = "purple")
+
+# Plot total flux in black with thicker line
+lines(data$time, data$total, col = "black", lwd = 2)
+
+# Add a legend
+legend("topright", legend = c("Bio", "Ocn", "Fossil", "Fire", "Total"), col = c("red", "blue", "green", "purple", "black"), lwd = 2)
+
+# Annual Fluxes
+plot(data$time, data$total, type = "l", col = "black", xlab = "Time", ylab = "Flux", main = "Annual Fluxes")
+```
+
+*e)* We will now look at **anomalies** in the fluxes, ie. differences from the mean. For each of the flux components and for the total flux, find the annual flux anomalies.
+
+* Flux anomaly = annual fluxes minus the mean flux over the whole time period. 
+
+* Plot two subplots using the same colours/lines as the previous plot: The upper panel should show the annual fluxes (identical to the lower panel of the previous plot) and the lower panel should show the anomalies.
+
+```{r fig.dim = c(6,8)}
+# Add code here 
+# Calculate mean flux for each component
+mean_bio <- mean(data$bio)
+mean_ocn <- mean(data$ocn)
+mean_fossil <- mean(data$fossil)
+mean_fire <- mean(data$fire)
+mean_total <- mean(data$total)
+
+# Calculate annual flux anomalies
+data$anomaly_bio <- data$bio - mean_bio
+data$anomaly_ocn <- data$ocn - mean_ocn
+data$anomaly_fossil <- data$fossil - mean_fossil
+data$anomaly_fire <- data$fire - mean_fire
+data$anomaly_total <- data$total - mean_total
+
+# Plot annual flux anomalies with the same colors/lines as the previous plot
+plot(data$time, data$total, type = "l", col = "black", xlab = "Time", ylab = "Flux Anomalies", main = "Annual Flux Anomalies")
+
+# Plot annual anomalies for the four components
+lines(data$time, data$anomaly_bio, col = "red")
+lines(data$time, data$anomaly_ocn, col = "blue")
+lines(data$time, data$anomaly_fossil, col = "green")
+lines(data$time, data$anomaly_fire, col = "purple")
+```
+
+*f)* What do the anomalies show us? Are the total fluxes increasing or decreasing? Which flux category is the main driver of the trend in fluxes? Which category is the main driver of year-to-year variability in fluxes?
+*Observations*
+- Season is main driver of the trend in fluxes. This could be higher energy consumption in summers or in winter based on the location, majorly linked to Bio. Anomolies majorly are linked to Fossil.
+
+# 5. Error propagation and examining the relationship between CO2 flux and growth rate
+
+*a)* Use the Mauna Loa CO2 timeseries (the measured timeseries, not the timeseries downscaled from Carbon Tracker) to find: i) annual mean CO2, and ii) CO2 growth rate per year (in ppm per year). 
+
+* One approach to find the mean CO2 is be to discretise year and then aggregate by year.
+
+* The growth rate can be defined as the difference in CO2 between subsequent years.
+
+* Plot the annual mean CO2 and the growth rate in two subplots. 
+
+```{r fig.dim = c(6,8)}
+# Add code here 
+importdata <- function(station) {
+  # Get the data
+  file = paste0("data/co2_",station,"_surface-insitu_2_3001-9999_daily.txt")
+  data = read.delim(file,sep = " ", comment.char = '#')
+  # Fix timestamp
+  date = paste(data$year,data$month,data$day,sep="-")
+  time = paste(data$hour,data$minute,data$second,sep=":")
+  data$dt = ymd_hms(paste(date,time,sep=" "))
+  # Replace missing with NaN
+  data$value[data$value<0] = NaN
+  # Find annual means
+  ann_means = aggregate(data$value, list(data$year), FUN=mean, na.rm=TRUE) 
+  colnames(ann_means) = c("year","value")
+  # Detrend
+  data$value_detrended = data$value*NaN # create space for detrended data
+  for (n in seq_along(ann_means$year)){ # Use a while loop to run through all the years
+    tmp = data$year==ann_means$year[n]
+    data$value_detrended[tmp] = data$value[tmp] - ann_means$value[n] 
+  }
+  # Create a list with our outputs
+  result = list(data=data,ann_means=ann_means)
+  return(result)
+}
+# This function outputs a list containing the data and the annual means for the desired station
+mlo = importdata("mlo")
+
+
+# Calculate annual mean CO2
+annual_mean_co2 <- aggregate(mlo$data$value, list(mlo$data$year), FUN = mean, na.rm = TRUE)
+colnames(annual_mean_co2) <- c("Year", "Mean_CO2")
+
+# Calculate CO2 growth rate per year (in ppm per year)
+annual_mean_co2$Growth_Rate <- c(NA, diff(annual_mean_co2$Mean_CO2))
+
+# Create a new plot with two subplots
+par(mfrow = c(2, 1))
+
+# Plot annual mean CO2
+plot(annual_mean_co2$Year, annual_mean_co2$Mean_CO2, type = "l", col = "blue", xlab = "Year", ylab = "CO2 (ppm)", main = "Annual Mean CO2")
+
+# Plot CO2 growth rate per year
+plot(annual_mean_co2$Year, annual_mean_co2$Growth_Rate, type = "l", col = "green", xlab = "Year", ylab = "Growth Rate (ppm/year)", main = "CO2 Growth Rate")
+
+# Reset the plot layout to default
+par(mfrow = c(1, 1))
+
+
+```
+
+*b)* Find the uncertainty in annual mean CO2 growth rate.
+
+* First, find the uncertainty (standard deviation) of the measurements in each year, and then use error propagation to find the uncertainty of the growth rate.
+
+* The growth rate is defined as the difference in CO2 between subsequent years; which error propagation rule is appropriate?
+
+```{r fig.dim = c(6,8)}
+# Add code here 
+# Calculate the uncertainty (standard deviation) of the measurements in each year.
+annual_mean_co2$Uncertainty <- aggregate(mlo$data$value, list(mlo$data$year), FUN = sd, na.rm = TRUE)$x
+
+# Calculate the uncertainty of the growth rate using error propagation (uncertainty in subtraction).
+# Assuming independent measurements, we can use the root sum of squares (RSS) formula.
+annual_mean_co2$Growth_Rate_Uncertainty <- sqrt(annual_mean_co2$Uncertainty^2 + c(0, annual_mean_co2$Uncertainty[-1]^2))
+```
+
+*c)* Now we will return to the annual mean fluxes (for the four categories and the total). Find the uncertainty in annual mean flux as the standard deviation of monthly fluxes within each year. 
+
+* Use error propagation to find the uncertainty in the flux anomalies.
+```{r}
+# Add code here
+# Calculate the uncertainty in annual mean flux (standard deviation of monthly fluxes within each year).
+annual_mean_flux_uncertainty <- tapply(sum_flux_df$total, format(as.Date(sum_flux_df$time, origin = "2000-01-01"), "%Y"), sd, na.rm = TRUE)
+
+# Calculate the uncertainty in flux anomalies using error propagation (uncertainty in subtraction).
+# Assuming independent measurements, we can use the root sum of squares (RSS) formula.
+flux_anomalies_uncertainty <- annual_mean_flux_uncertainty[match(format(as.Date(annual_mean_co2$Year, origin = "2000-01-01"), "%Y"), names(annual_mean_flux_uncertainty))]
+```
+
+*d)* Make a plot with three subplots. 
+
+* In the upper plot, show the flux anomalies (for the four cats + total) with error bars on the total only.
+
+* In the middle plot, show the growth rate of CO2 with error bars.
+
+* In the bottom plot, plot the total flux anomalies vs. growth rate of CO2 for all the years both are available, with points coloured by year. 
+
+* Include legend, labels, etc. as appropriate.
+
+```{r message=FALSE, warning=FALSE}
+# Add code here 
+# Create subplots
+par(mfrow = c(3, 1))
+
+# Upper plot: Flux anomalies with error bars on the total only.
+plot(sum_flux_df$time, sum_flux_df$total - mean(sum_flux_df$total, na.rm = TRUE), type = "l", col = "blue", xlab = "Time", ylab = "Flux Anomalies", main = "Flux Anomalies with Total Uncertainty")
+#arrows(sum_flux_df$time, sum_flux_df$total - mean(sum_flux_df$total, na.rm = TRUE) - flux_anomalies_uncertainty,
+       #sum_flux_df$time, sum_flux_df$total - mean(sum_flux_df$total, na.rm = TRUE) + flux_anomalies_uncertainty, angle = 90, code = 3, length = 0.05, col = "red")
+
+# Middle plot: CO2 growth rate with error bars.
+plot(annual_mean_co2$Year, annual_mean_co2$Growth_Rate, type = "l", col = "green", xlab = "Year", ylab = "CO2 Growth Rate", main = "CO2 Growth Rate with Uncertainty")
+arrows(annual_mean_co2$Year, annual_mean_co2$Growth_Rate - annual_mean_co2$Growth_Rate_Uncertainty,
+       annual_mean_co2$Year, annual_mean_co2$Growth_Rate + annual_mean_co2$Growth_Rate_Uncertainty, angle = 90, code = 3, length = 0.05, col = "purple")
+
+# Bottom plot: Total flux anomalies vs. growth rate of CO2 with points colored by year.
+common_years <- intersect(format(as.Date(sum_flux_df$time, origin = "2000-01-01"), "%Y"), annual_mean_co2$Year)
+plot(sum_flux_df$time, sum_flux_df$total - mean(sum_flux_df$total, na.rm = TRUE), type = "l", col = "blue", xlab = "Time", ylab = "Flux Anomalies", main = "Flux Anomalies with Total Uncertainty", xlim = c(min(sum_flux_df$time), max(sum_flux_df$time)))
+#arrows(sum_flux_df$time, sum_flux_df$total - mean(sum_flux_df$total, na.rm = TRUE) - flux_anomalies_uncertainty,
+ #      sum_flux_df$time, sum_flux_df$total - mean(sum_flux_df$total, na.rm = TRUE) + flux_anomalies_uncertainty, angle = 90, code = 3, length = 0.05, col = "red")
+
+# Reset the plot layout to default
+par(mfrow = c(1, 1))
+
+
+```
+
+*e)* Does the plot show a relationship between the flux anomaly and the CO2 growth rate?
+
+*What relationship do you see?*
+There seems to be a positive relationship. I could not plot it to entireity.
+
+# 6. Summary
+
+In this application, you have:
+
+* Imported and investigated datasets with .nc and .csv formats, describing CO2 mixing ratio and flux
+
+* Explored the datasets with a variety of statistical approaches
+
+* Downscaled global data for comparison to point data and aggregated to compare data with differing temporal resolutions
+
+* Used linear regression to examine the link between fluxes and CO2 growth rate
+
+Throughout this application, you have practiced the key R skills of data organisation, plotting, and function creation. These skills are a core part of programming for data science and can be applied to any problem you will encounter. Good luck with your future data science projects!
+
